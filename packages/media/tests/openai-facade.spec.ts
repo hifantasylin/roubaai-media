@@ -172,10 +172,34 @@ describe('openai facade: image generations', () => {
     expect((json['data'] as Array<{ id: string }>).map((model) => model.id)).toContain('stub-image-v1')
   })
 
-  it('rejects a non-POST method', async () => {
+  it('rejects a non-POST method and names it', async () => {
     const { ctx } = await boot()
-    const { status } = await call(ctx, { method: 'GET' })
+    const { status, json } = await call(ctx, { method: 'GET' })
     expect(status).toBe(405)
+    expect(String((json['error'] as { message: string }).message)).toContain('GET')
+    expect(String((json['error'] as { message: string }).message)).toContain('expects POST')
+  })
+
+  it('answers a CORS preflight instead of rejecting it as a wrong method', async () => {
+    const { ctx } = await boot()
+    const res = fakeResponse()
+    await handleOpenAiRequest(
+      ctx,
+      fakeRequest({ method: 'OPTIONS', headers: { origin: 'http://127.0.0.1:3000' } }) as unknown as IncomingMessage,
+      res as unknown as ServerResponse,
+      new URL(GENERATIONS, 'http://127.0.0.1:3080'),
+    )
+    expect(res.status).toBe(204)
+    expect(res.headers['access-control-allow-origin']).toBe('http://127.0.0.1:3000')
+    expect(String(res.headers['access-control-allow-methods'])).toContain('POST')
+  })
+
+  it('accepts another loopback origin but still refuses a public one', async () => {
+    const { ctx } = await boot()
+    const loopback = await call(ctx, { headers: { origin: 'http://localhost:3000', host: '127.0.0.1:3080' }, body: { prompt: 'x' } })
+    expect(loopback.status).toBe(200)
+    const publicOrigin = await call(ctx, { headers: { origin: 'https://evil.test', host: '127.0.0.1:3080' }, body: { prompt: 'x' } })
+    expect(publicOrigin.status).toBe(403)
   })
 
   it('answers 400 for an edit body that carries no image to edit', async () => {

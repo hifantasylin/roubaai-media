@@ -46,6 +46,27 @@ import type { ImageGenerateInput, ImageGenerationResult, ImageProvider, VideoGen
 /** Route prefix on the host webserver, under the media routes. */
 export const OPENAI_FACADE_PREFIX = `${MEDIA_ROUTE_PREFIX}/openai`
 
+/**
+ * Answer a CORS preflight.
+ *
+ * A same-origin page never sends one, but a canvas served from another origin
+ * (its own dev server, say) does — and a bare 405 to the preflight looks like a
+ * broken backend rather than a missing header. The route binds to loopback and
+ * carries no credential of its own, so reflecting the caller's origin is safe
+ * here; the host's own credential never reaches the browser either way.
+ */
+function sendPreflight(req: IncomingMessage, res: ServerResponse): void {
+  const origin = req.headers.origin
+  res.writeHead(204, {
+    ...(origin === undefined || origin === '' ? {} : { 'access-control-allow-origin': origin }),
+    'access-control-allow-methods': 'GET, POST, OPTIONS',
+    'access-control-allow-headers': 'content-type, authorization, x-roubaai-workspace, x-roubaai-project, x-roubaai-dir, x-roubaai-name, x-roubaai-category',
+    'access-control-max-age': '600',
+    'cache-control': 'no-store',
+  })
+  res.end()
+}
+
 /** Longest request body accepted, in bytes. A prompt is not a payload. */
 const MAX_BODY_BYTES = 1024 * 1024
 
@@ -141,7 +162,12 @@ function sameOrigin(req: IncomingMessage): boolean {
   const host = req.headers.host
   if (host === undefined || host === '') return false
   try {
-    return new URL(origin).host === host
+    const parsed = new URL(origin)
+    // The host's own origin, or another loopback one: the canvas may be served by
+    // its own dev server during development, and loopback is already the boundary
+    // these routes bind to. A public origin is a page that has no business here.
+    if (parsed.host === host) return true
+    return parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost' || parsed.hostname === '[::1]'
   } catch {
     return false
   }
@@ -259,6 +285,10 @@ export async function handleOpenAiRequest(
   res: ServerResponse,
   url: URL,
 ): Promise<void> {
+  if (req.method === 'OPTIONS') {
+    sendPreflight(req, res)
+    return
+  }
   if (!sameOrigin(req)) {
     sendJson(res, 403, { error: { message: 'cross-origin request refused', type: 'invalid_request_error' } })
     return
@@ -287,7 +317,11 @@ export async function handleOpenAiRequest(
   }
 
   if (req.method !== 'POST') {
-    sendJson(res, 405, { error: { message: 'method not allowed', type: 'invalid_request_error' } })
+    // Name the method and the path: a bare "method not allowed" gives a caller
+    // nothing to act on, and this endpoint is reached by a client we do not own.
+    sendJson(res, 405, {
+      error: { message: `method not allowed: ${req.method ?? 'UNKNOWN'} ${path} expects POST`, type: 'invalid_request_error' },
+    })
     return
   }
   if (IMAGE_EDIT_PATHS.has(path)) {
@@ -712,7 +746,9 @@ function completedVideoBody(id: string, completed: NonNullable<VideoTaskEntry['c
 /** Submit one video task from the canvas's multipart body. */
 async function createVideoTask(ctx: Context, req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== 'POST') {
-    sendJson(res, 405, { error: { message: 'method not allowed', type: 'invalid_request_error' } })
+    sendJson(res, 405, {
+      error: { message: `method not allowed: ${req.method ?? 'UNKNOWN'} /v1/videos expects POST`, type: 'invalid_request_error' },
+    })
     return
   }
   const body = await readBodyBuffer(req)
