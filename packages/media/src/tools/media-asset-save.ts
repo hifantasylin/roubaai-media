@@ -27,14 +27,14 @@
  * @module @roubaai/media/tools/media-asset-save
  */
 
-import { mkdir, writeFile, appendFile, readFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { readFile } from 'node:fs/promises'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView } from '@deepseek-ai/dsh-tools'
-import { cachedMediaBytes, registerLocalMedia } from '../media-cache.ts'
+import { cachedMediaBytes } from '../media-cache.ts'
+import { ASSET_CATEGORIES, isAssetCategory, landMediaAsset, resolveLandingPath } from '../asset-landing.ts'
 
 export const name = 'media_asset_save'
 
@@ -42,7 +42,7 @@ export const name = 'media_asset_save'
 const HOST_BASE = (process.env.DSH_MEDIA_HOST ?? 'http://127.0.0.1:3080').replace(/\/$/, '')
 
 /** Allowed asset categories (English ids; 项目名等用户指定内容才用中文). */
-const CATEGORIES = ['upload', 'character', 'scene', 'prop', 'keyframe', 'video', 'storyboard', 'cover', 'meta'] as const
+const CATEGORIES = ASSET_CATEGORIES
 
 type ResolvedSource =
   | { kind: 'attachment'; ref: ImageAttachmentRef; publicUrl?: string }
@@ -260,11 +260,10 @@ export function registerMediaAssetSave(ctx: Context): () => void {
         source = { kind: 'stored-image', data: stored.data, mediaType: stored.mediaType }
       }
       const category = args.category
-      if (!(CATEGORIES as readonly string[]).includes(category)) {
+      if (!isAssetCategory(category)) {
         throw new Error(`media_asset_save: unsupported category ${category}; use one of ${CATEGORIES.join(', ')}`)
       }
 
-      // Asset root = <workspace>/.assets/<project>/<category>.
       const workspace = workspaceOf(exec.agent)
       const isVideo = source.kind === 'url'
         ? isVideoUrl(source.url)
@@ -275,21 +274,9 @@ export function registerMediaAssetSave(ctx: Context): () => void {
       const ext = source.kind === 'stored-image'
         ? STORED_MEDIA_EXTENSIONS[source.mediaType] ?? 'png'
         : isVideo ? 'mp4' : isAudio ? 'mp3' : 'png'
-      // 保留 `/` 作为子路径分隔符（用于角色素材按 角色/类目/条目 组织），其余非法字符替换；拒绝路径穿越。
-      if (/\.\./.test(args.name) || /^[a-zA-Z]:[\\/]/.test(args.name) || args.name.startsWith('/')) {
-        throw new Error('media_asset_save: name must be a relative sub-path without `..` or drive letters')
-      }
-      const safeName = args.name.replace(/[\\:*?"<>|]/g, '_')
-      // dir 必填：落盘子目录由 LLM 按项目实际结构传参，安全约束与 name 相同。
-      if (typeof args.dir !== 'string' || args.dir.trim() === '') {
-        throw new Error('media_asset_save: dir is required — landing sub-directory under `.assets/<project>/`, e.g. `01_角色/CH001_花十/02_定稿图`')
-      }
-      if (/\.\./.test(args.dir) || /^[a-zA-Z]:[\\/]/.test(args.dir) || args.dir.startsWith('/')) {
-        throw new Error('media_asset_save: dir must be a relative sub-path without `..` or drive letters')
-      }
-      const safeDir = args.dir.replace(/[\\:*?"<>|]/g, '_')
-      const projectDir = join(workspace, '.assets', args.project)
-      const filePath = join(projectDir, safeDir, `${safeName}.${ext}`)
+      // Resolve (and validate) the destination before the job starts, so a bad
+      // name or directory fails the call instead of an invisible background job.
+      const { filePath, safeDir, safeName } = resolveLandingPath({ workspace, project: args.project, dir: args.dir, name: args.name, ext }, 'media_asset_save')
 
       const jobId = ctx.jobs.start({
         kind: 'media-asset',
@@ -300,22 +287,24 @@ export function registerMediaAssetSave(ctx: Context): () => void {
           const done = (async (): Promise<{ status: 'completed' | 'failed'; output?: string; detail?: string }> => {
             try {
               const data = await fetchBytes(ctx, source, ac.signal)
-              await mkdir(dirname(filePath), { recursive: true })
-              await writeFile(filePath, data)
-              await appendIndex(projectDir, {
-                category, name: safeName, path: filePath, ref: args.reference,
+              // One landing path for both this tool and the canvas facade; the
+              // display URL is registered so the same-origin stream route serves
+              // THIS copy rather than going back to the provider.
+              const landed = await landMediaAsset({
+                workspace,
+                project: args.project,
+                dir: args.dir,
+                name: args.name,
+                ext,
+                bytes: data,
+                category,
+                reference: args.reference,
                 // Prefer a URL carried inside the reference JSON (resultUrl /
                 // mediaRef.url) over a bare https scan of the raw text.
                 url: (source.kind === 'url' ? source.url : source.publicUrl) ?? extractPublicUrl(args.reference),
-                ts: Date.now(), mediaType: ext,
+                displayUrl: source.kind === 'url' ? source.url : source.publicUrl,
               })
-              // Register the landed file under its source URL so the media tool
-              // card can stream THIS local copy (same origin) once it exists.
-              const displayUrl = source.kind === 'url' ? source.url : source.publicUrl
-              if (displayUrl !== undefined) {
-                registerLocalMedia({ url: displayUrl, filePath, mediaType: mediaMimeOf(ext) })
-              }
-              return { status: 'completed', output: JSON.stringify({ path: filePath, sizeBytes: data.byteLength, mediaType: ext }) }
+              return { status: 'completed', output: JSON.stringify({ path: landed.path, sizeBytes: landed.bytes, mediaType: ext }) }
             } catch (error) {
               if (ac.signal.aborted) return { status: 'failed', detail: 'aborted' }
               return { status: 'failed', detail: error instanceof Error ? error.message : String(error) }
@@ -359,25 +348,6 @@ function isAudioUrl(url: string): boolean {
     || /\.m4a(\?|$)/i.test(url)
 }
 
-/** MIME for a saved file extension (media cache registration + asset index). */
-function mediaMimeOf(ext: string): string {
-  switch (ext) {
-    case 'png': return 'image/png'
-    case 'jpg': case 'jpeg': return 'image/jpeg'
-    case 'webp': return 'image/webp'
-    case 'gif': return 'image/gif'
-    case 'mp4': case 'm4v': return 'video/mp4'
-    case 'webm': return 'video/webm'
-    case 'mov': return 'video/quicktime'
-    case 'mp3': return 'audio/mpeg'
-    case 'm4a': return 'audio/mp4'
-    case 'wav': return 'audio/wav'
-    case 'aac': return 'audio/aac'
-    case 'ogg': case 'oga': return 'audio/ogg'
-    default: return 'application/octet-stream'
-  }
-}
-
 /** Fetch/read the bytes for a resolved source. */
 async function fetchBytes(ctx: Context, source: ResolvedSource, signal?: AbortSignal): Promise<Uint8Array> {
   switch (source.kind) {
@@ -418,22 +388,7 @@ export function extractPublicUrl(reference: string): string | undefined {
   return /^https:\/\//i.test(value) ? value : undefined
 }
 
-/** Append one line to the project asset index (writes the header on first use). */
-export async function appendIndex(assetsDir: string, entry: { category: string; name: string; path: string; ref: string; url: string | undefined; ts: number; mediaType: string }): Promise<void> {
-  const indexPath = join(assetsDir, 'assets-index.md')
-  const header = '| 类别 | 资产名 | 路径 | 原始URL | 时间 |\n|------|--------|------|--------|------|\n'
-  let content = ''
-  try {
-    content = await readFile(indexPath, 'utf8')
-  } catch {
-    content = ''
-  }
-  if (!content.trim()) {
-    await appendFile(indexPath, header)
-  }
-  const url = entry.url ?? ''
-  const line = `| ${entry.category} | ${entry.name}.${entry.mediaType} | \`${entry.path}\` | ${url !== '' ? `\`${url}\`` : '-'} | ${new Date(entry.ts).toISOString()} |\n`
-  await appendFile(indexPath, line)
-}
+/** Append one line to the project asset index (re-exported from the landing module). */
+export { appendIndex } from '../asset-landing.ts'
 
 export default registerMediaAssetSave

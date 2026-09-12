@@ -17,11 +17,13 @@
  * What this module does NOT do yet, deliberately:
  * - the video task endpoints and the multipart edit body answer 501 with a
  *   stated reason instead of 404 (`unsupported` below), so a wrong URL and an
- *   unimplemented one stay distinguishable;
- * - no cost-ledger entry and no `.assets` landing. Both need the rate table and
- *   the asset pipeline the `generate_*` tools own, and wiring them without that
- *   reuse would put numbers in the ledger that nothing verified. The response
- *   says so in its `roubaai` block instead of implying a record exists.
+ *   unimplemented one stay distinguishable.
+ *
+ * A finished image is cached on the host and landed into
+ * `<workspace>/.assets/<project>/<dir>/` with an index row and a cost-ledger
+ * entry, exactly as a `generate_image` call would — the caller names the
+ * destination with headers, and the defaults keep a canvas run self-describing
+ * (`default/90_画布/canvas-<timestamp>`).
  *
  * @module @roubaai/media/openai-facade
  */
@@ -30,7 +32,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 // Type-only: pulls the webServer Context augmentation (ctx.webServer).
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { MEDIA_ROUTE_PREFIX, downloadToCache } from './media-cache.ts'
+import { MEDIA_ROUTE_PREFIX, cachedMediaBytes, downloadToCache } from './media-cache.ts'
+import { landMediaAsset } from './asset-landing.ts'
+import { appendMediaCost } from './cost-ledger.ts'
 import { MEDIA_SETTINGS_NAMESPACE, readActiveAdapter, readActiveMediaProvider } from './settings-lookup.ts'
 import type { ImageGenerateInput, ImageGenerationResult } from './provider.ts'
 
@@ -47,6 +51,31 @@ const IMAGE_EDIT_PATHS = new Set(['/v1/images/edits', '/images/edits'])
 
 /** Header a caller uses to name the workspace the run should be billed to. */
 export const WORKSPACE_HEADER = 'x-roubaai-workspace'
+/** Header naming the project folder under `.assets/`. */
+export const PROJECT_HEADER = 'x-roubaai-project'
+/** Header naming the landing sub-directory under the project. */
+export const DIR_HEADER = 'x-roubaai-dir'
+/** Header naming the asset (extension added by the landing rules). */
+export const NAME_HEADER = 'x-roubaai-name'
+/** Header naming the asset category. */
+export const CATEGORY_HEADER = 'x-roubaai-category'
+
+/** Where a canvas run lands when the caller names nothing. */
+const DEFAULT_PROJECT = 'default'
+const DEFAULT_DIR = '90_画布'
+const DEFAULT_CATEGORY = 'keyframe'
+
+/** One request header, tolerating the array form node may hand back. */
+function headerValue(req: IncomingMessage, name: string): string | undefined {
+  const raw = req.headers[name]
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return value === undefined || value.trim() === '' ? undefined : value.trim()
+}
+
+/** A file-name-safe timestamp, so two canvas runs never collide. */
+function timestampName(): string {
+  return `canvas-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`
+}
 
 function sendJson(res: ServerResponse, status: number, value: unknown): void {
   const body = Buffer.from(JSON.stringify(value), 'utf8')
@@ -285,19 +314,65 @@ export async function handleOpenAiRequest(
     return
   }
 
+  // Land the bytes and record the run, the same way `generate_image` does. Both
+  // steps are best-effort on purpose: the image exists and its URL is in hand, so
+  // a filesystem or ledger problem must not turn a finished generation into a
+  // failure the caller would retry — it is reported in the response instead.
+  const workspace = headerValue(req, WORKSPACE_HEADER) ?? process.cwd()
+  const project = headerValue(req, PROJECT_HEADER) ?? DEFAULT_PROJECT
+  const name = headerValue(req, NAME_HEADER) ?? timestampName()
+  const tier = input.resolution ?? '1K'
+  let landed: string | undefined
+  let ledger = false
+  const bytes = remote === undefined ? undefined : await cachedMediaBytes(remote)
+  if (bytes !== undefined) {
+    try {
+      const asset = await landMediaAsset({
+        workspace,
+        project,
+        dir: headerValue(req, DIR_HEADER) ?? DEFAULT_DIR,
+        name,
+        ext: 'png',
+        bytes,
+        category: headerValue(req, CATEGORY_HEADER) ?? DEFAULT_CATEGORY,
+        reference: remote ?? url_,
+        url: remote,
+        displayUrl: remote,
+      })
+      landed = asset.path
+    } catch (error) {
+      ctx.logger.warn(`roubaai-media: canvas asset landing failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  try {
+    const model = result.providerMeta.model
+    await appendMediaCost(workspace, {
+      ts: Date.now(),
+      tool: 'image',
+      model,
+      project,
+      label: name,
+      spec: tier,
+      costUsd: provider.estimateCostUsd(model, tier) ?? 0,
+      source: 'estimated',
+      taskId: result.providerMeta.provider,
+    })
+    ledger = true
+  } catch (error) {
+    ctx.logger.warn(`roubaai-media: canvas cost ledger append failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
   sendJson(res, 200, {
     created: Math.floor(Date.now() / 1000),
     data: [{ url: url_ }],
     roubaai: {
       provider: result.providerMeta.provider,
       model: result.providerMeta.model,
-      ...(input.resolution === undefined ? {} : { tier: input.resolution }),
+      tier,
       ...(result.run?.size === undefined ? {} : { size: result.run.size }),
-      // Stated rather than implied: until the asset pipeline is wired to this
-      // path, a canvas run leaves no file under `.assets`. The URL it answers
-      // with is already cached locally, so it outlives the provider's CDN link.
-      ledger: false,
-      landed: false,
+      ledger,
+      landed: landed !== undefined,
+      ...(landed === undefined ? {} : { assetPath: landed }),
       ...(ignored.length === 0 ? {} : { ignored }),
     },
   })
