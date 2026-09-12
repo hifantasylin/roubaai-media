@@ -3,8 +3,9 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Writable } from 'node:stream'
+import type { Context } from '@deepseek-ai/cordis'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { handleCanvasRequest, resolveCanvasFile } from '../src/index.ts'
+import { apply, handleCanvasRequest, handlePanelInfoRequest, resolveCanvasFile } from '../src/index.ts'
 
 let root = ''
 
@@ -122,5 +123,89 @@ describe('canvas host: serving', () => {
     const { status, text } = await get('/workbench/', { basePath: '/workbench', canvasRoot: root, openaiBasePath: '/api/roubaai-media/openai' })
     expect(status).toBe(200)
     expect(text).toContain('<title>canvas</title>')
+  })
+})
+
+describe('canvas host: the in-app panel route', () => {
+  it('answers the mount point as JSON', () => {
+    const res = fakeResponse()
+    handlePanelInfoRequest(
+      { method: 'GET' } as unknown as IncomingMessage,
+      res as unknown as ServerResponse,
+      { basePath: '/workbench' },
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers['content-type']).toBe('application/json; charset=utf-8')
+    expect(JSON.parse((res as unknown as { text: () => string }).text())).toEqual({ basePath: '/workbench' })
+  })
+
+  it('carries no credential', () => {
+    const res = fakeResponse()
+    handlePanelInfoRequest(
+      { method: 'GET' } as unknown as IncomingMessage,
+      res as unknown as ServerResponse,
+      { basePath: '/canvas' },
+    )
+    expect((res as unknown as { text: () => string }).text()).not.toMatch(/apiKey|sk-/)
+  })
+
+  it('refuses a write', () => {
+    const res = fakeResponse()
+    handlePanelInfoRequest(
+      { method: 'POST' } as unknown as IncomingMessage,
+      res as unknown as ServerResponse,
+      { basePath: '/canvas' },
+    )
+    expect(res.status).toBe(405)
+  })
+})
+
+describe('canvas host: route registration', () => {
+  interface Route { kind: string; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void }
+
+  function mounted(config: Parameters<typeof apply>[1] = {}): Route[] {
+    const routes: Route[] = []
+    const ctx = {
+      logger: { warn: () => undefined },
+      effect: (fn: () => unknown) => fn(),
+      webServer: {
+        register: (route: Route) => {
+          routes.push(route)
+          return () => undefined
+        },
+      },
+    } as unknown as Context
+    apply(ctx, { canvasRoot: root, ...config })
+    return routes
+  }
+
+  it('mounts the app and the panel route', () => {
+    expect(mounted().map(route => route.path)).toEqual(['/canvas', '/api/roubaai-canvas'])
+  })
+
+  it('follows a custom mount point and panel route', () => {
+    const routes = mounted({ basePath: '/workbench', panelInfoPath: '/api/panel' })
+    expect(routes.map(route => route.path)).toEqual(['/workbench', '/api/panel'])
+  })
+
+  it('serves the panel route the client half reads', async () => {
+    // The browser half can only hardcode this path: it holds no configuration.
+    const route = mounted()[1] as Route
+    const res = fakeResponse()
+    route.handler(
+      { method: 'GET', url: '/api/roubaai-canvas/panel' } as unknown as IncomingMessage,
+      res as unknown as ServerResponse,
+    )
+    expect(JSON.parse((res as unknown as { text: () => string }).text())).toEqual({ basePath: '/canvas' })
+  })
+
+  it('answers nothing else under the panel prefix', () => {
+    const route = mounted()[1] as Route
+    const res = fakeResponse()
+    route.handler(
+      { method: 'GET', url: '/api/roubaai-canvas/anything' } as unknown as IncomingMessage,
+      res as unknown as ServerResponse,
+    )
+    expect(res.status).toBe(404)
   })
 })

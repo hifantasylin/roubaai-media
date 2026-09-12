@@ -12,6 +12,12 @@
  *   on startup — listing the asset-library node this package ships;
  * - `/plugins/roubaai-assets.js` — that node plugin.
  *
+ * It also serves one route outside the mount point, under `panelInfoPath`
+ * (default `/api/roubaai-canvas`): `GET <panelInfoPath>/panel` answers the
+ * resolved mount point. The client half embeds the canvas in an iframe and
+ * cannot read the composition's configuration, so this is how the panel finds
+ * an app mounted somewhere other than `/canvas`.
+ *
  * `canvasRoot` must be a build made with a matching `VITE_BASE` (the frontend
  * references its bundle as `/assets/...`, so a build for `/` cannot be served
  * under `/canvas/`). With no `canvasRoot` configured the route answers a plain
@@ -42,6 +48,12 @@ const DEFAULT_BASE_PATH = '/canvas'
  * path instead of being asked for a base URL and a key of its own.
  */
 const DEFAULT_OPENAI_BASE_PATH = '/api/roubaai-openai'
+
+/**
+ * Where the in-app panel reads this plugin's runtime paths. Separate from
+ * `basePath` because it must not be shadowed by the canvas SPA fallback.
+ */
+const DEFAULT_PANEL_INFO_PATH = '/api/roubaai-canvas'
 
 /**
  * The package root, found by walking up to the nearest `package.json`.
@@ -76,6 +88,11 @@ export interface CanvasConfig {
    * `config.js`. Defaults to the media plugin's OpenAI-compatible facade.
    */
   readonly openaiBasePath?: string
+  /**
+   * Where the in-app panel reads the resolved mount point; the route is
+   * `<panelInfoPath>/panel`. Defaults to `/api/roubaai-canvas`.
+   */
+  readonly panelInfoPath?: string
 }
 
 /** Normalize a mount point into `/<name>` with no trailing slash. */
@@ -232,6 +249,28 @@ export async function handleCanvasRequest(
 }
 
 /**
+ * Answer the in-app panel's runtime-path request.
+ *
+ * The panel embeds the canvas in an iframe and runs in the shell's browser
+ * context, where the composition's configuration is not readable: hardcoding
+ * `/canvas` there would break a deployment that moved the app.
+ * @param req - the incoming request.
+ * @param res - the response to write.
+ * @param info - the resolved mount point.
+ */
+export function handlePanelInfoRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  info: { basePath: string },
+): void {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    send(res, 405, 'text/plain; charset=utf-8', 'method not allowed')
+    return
+  }
+  send(res, 200, 'application/json; charset=utf-8', `${JSON.stringify({ basePath: info.basePath })}\n`)
+}
+
+/**
  * Register the canvas routes on the host webserver.
  * @param ctx - the plugin context.
  * @param config - the composition's configuration for this plugin.
@@ -240,6 +279,7 @@ export function apply(ctx: Context, config: CanvasConfig = {}): void {
   const basePath = normalizeBasePath(config.basePath)
   const canvasRoot = resolve(config.canvasRoot ?? '')
   const openaiBasePath = config.openaiBasePath ?? DEFAULT_OPENAI_BASE_PATH
+  const panelInfoPath = normalizeBasePath(config.panelInfoPath ?? DEFAULT_PANEL_INFO_PATH)
   if (canvasRoot === '') {
     ctx.logger.warn(`roubaai-canvas: canvasRoot is unset; ${basePath}/ will explain how to build the frontend`)
   }
@@ -254,6 +294,18 @@ export function apply(ctx: Context, config: CanvasConfig = {}): void {
       })
     },
   }), 'roubaai-canvas: canvas app routes')
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'prefix',
+    path: panelInfoPath,
+    handler: (req, res): void => {
+      const url = new URL(req.url ?? panelInfoPath, 'http://dsh.internal')
+      if (url.pathname.replace(/\/+$/, '') !== `${panelInfoPath}/panel`) {
+        send(res, 404, 'text/plain; charset=utf-8', 'not found')
+        return
+      }
+      handlePanelInfoRequest(req, res, { basePath })
+    },
+  }), 'roubaai-canvas: in-app panel info')
 }
 
 export default { name, inject, apply }

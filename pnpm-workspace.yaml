@@ -8,8 +8,10 @@ linkWorkspacePackages: true
 
 # pnpm 10+ blocks dependencies that ship install/build scripts until each is
 # reviewed here (strictDepBuilds: an unlisted script is a hard install error).
-# We deny by default; nothing in this closure genuinely needs one.
-allowBuilds: {}
+# node-pty arrives with dsh-better-sidebar, on which this repo takes a type-only
+# dependency: the sidebar's terminal tab needs the native build, nothing here
+# ever loads it, so the build stays off rather than requiring a toolchain.
+allowBuilds: { node-pty: false }
 
 # `pnpm run` re-runs install when the lockfile looks stale. This repo installs
 # explicitly (dev loop and release job both do), so the implicit pass only adds
