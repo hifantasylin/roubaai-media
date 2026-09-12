@@ -15,6 +15,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { MediaRuntimeLocal } from './media-local.ts'
 import { MediaUrlNormalizer } from './tunnel.ts'
 import { registerWebRoutes } from './media-cache.ts'
+import { registerOpenAiRoutes } from './openai-facade.ts'
 import { registerGenerateImage } from './tools/generate-image.ts'
 import { registerGenerateVideo } from './tools/generate-video.ts'
 import { registerGenerateMusic } from './tools/generate-music.ts'
@@ -54,6 +55,7 @@ export type {
 } from './provider.ts'
 export type { MediaRuntime } from './service.ts'
 export { NoProviderError, MediaRuntimeLocal } from './media-local.ts'
+export { OPENAI_FACADE_PREFIX, registerOpenAiRoutes, mapImageRequest } from './openai-facade.ts'
 
 export const name = 'roubaai-media'
 export const inject = ['tools', 'jobs', 'attachments', 'webServer']
@@ -71,6 +73,10 @@ export function apply(ctx: Context): void {
   // CDN. Requires the host webserver (web deployments); the plugin's tools
   // remain usable headless where no webServer route can mount.
   ctx.effect(() => registerWebRoutes(ctx.webServer), 'roubaai-media: media stream routes')
+  // OpenAI-compatible facade for a browser workbench (the canvas): the channel's
+  // requests reach the same providers as the agent tools while the key stays in
+  // this process. See openai-facade.ts for what it does not serve yet.
+  ctx.effect(() => registerOpenAiRoutes(ctx), 'roubaai-media: openai facade routes')
   registerGenerateImage(ctx)
   registerGenerateVideo(ctx)
   registerGenerateMusic(ctx)
