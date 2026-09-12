@@ -19,7 +19,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { MusicProvider, readActiveMediaProvider } from '@roubaai/media'
 import type {
-  MusicGenerateInput, MusicTaskHandle, MusicTaskPoll, MusicTrackInfo,
+  MusicGenerateInput, MusicTaskHandle, MusicTaskPoll, MusicTrackInfo, ProviderProbeDraft, ProviderProbeResult,
 } from '@roubaai/media'
 import { DEFAULT_SETTINGS_NAMESPACE } from './settings-config.ts'
 
@@ -232,6 +232,41 @@ export class MxapiMusicProvider extends MusicProvider {
       ...task.result?.custom_id !== undefined ? { clipId: task.result.custom_id } : {},
       ...info?.duration !== undefined ? { durationSeconds: info.duration } : {},
       ...info?.cosUrl !== undefined && info.cosUrl !== '' ? { coverUrl: info.cosUrl } : {},
+    }
+  }
+
+  /**
+   * Probe the endpoint and key a configuration form holds. The music API is not
+   * OpenAI-compatible and has no `GET /models`, so the cheapest authenticated
+   * request is a task lookup: an unknown id answers a business-JSON 404, which
+   * still proves the endpoint is reachable and the key accepted (an
+   * unauthorized key is refused before the id is read).
+   */
+  async probe(draft: ProviderProbeDraft): Promise<ProviderProbeResult> {
+    if (draft.apiKey.trim() === '') return { ok: false, message: '未填写 API Key' }
+    const base = draft.baseUrl.trim().replace(/\/+$/, '')
+    if (base === '') return { ok: false, message: '未填写接口地址' }
+    try {
+      const response = await fetch(`${base}/task?id=connection-probe`, {
+        method: 'GET',
+        headers: { authorization: `Bearer ${draft.apiKey}`, accept: 'application/json' },
+        signal: AbortSignal.timeout(15_000),
+      })
+      if (response.ok) return { ok: true, message: `连接成功（HTTP ${response.status}）` }
+      if (response.status === 404) {
+        const body = await response.json().catch(() => undefined) as { code?: unknown, message?: unknown } | undefined
+        if (typeof body === 'object' && body !== null && body['code'] !== undefined) {
+          return { ok: true, message: `连接成功（HTTP 404，${String(body['message'] ?? '任务不存在')}）` }
+        }
+      }
+      return {
+        ok: false,
+        message: response.status === 401 || response.status === 403
+          ? `API Key 被拒绝（HTTP ${response.status}）`
+          : `端点返回 HTTP ${response.status}`,
+      }
+    } catch (error) {
+      return { ok: false, message: `无法连接端点：${error instanceof Error ? error.message : String(error)}` }
     }
   }
 

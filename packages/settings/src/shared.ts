@@ -146,6 +146,12 @@ export interface SettingsView {
   revision?: number
   /** Every schema-declared secret slot with its configured state. */
   secrets: SettingsSecretView[]
+  /**
+   * Registry names of the providers this deployment mounted, per category. The
+   * Settings page offers them as a row's adapter; an absent map leaves every
+   * row's stored adapter untouched.
+   */
+  adapters?: Record<MediaCategory, string[]>
 }
 
 /** One connection-test result. */

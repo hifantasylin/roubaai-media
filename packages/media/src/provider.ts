@@ -97,6 +97,28 @@ export interface ImageGenerateInput {
 }
 
 /**
+ * Values a configuration form is looking at, an unsaved key included. A probe
+ * runs against these rather than the stored document so a key can be verified
+ * in the same breath it is typed.
+ */
+export interface ProviderProbeDraft {
+  /** Endpoint base the form shows. */
+  baseUrl: string
+  /** API key the form holds. */
+  apiKey: string
+  /** Model the form shows, when the category configures one. */
+  model?: string
+}
+
+/** Outcome of a connectivity probe. */
+export interface ProviderProbeResult {
+  /** Whether the endpoint answered and accepted the key. */
+  ok: boolean
+  /** Human-readable outcome: the status, or why the probe failed. */
+  message: string
+}
+
+/**
  * Bounds one provider enforces for an image request. The tool validates against
  * them before submitting, so a request the backend would reject costs nothing.
  */
@@ -148,6 +170,16 @@ export abstract class ImageProvider {
    * @returns the estimated USD cost, or `undefined` when unpriceable.
    */
   abstract estimateCostUsd(model: string, resolution: string): number | undefined
+
+  /**
+   * Probe this backend with the values a configuration form is looking at,
+   * including a key that has not been saved. The adapter owns the probe because
+   * only it knows which request proves both reachability and key acceptance for
+   * its protocol.
+   * @param draft - the values the form shows.
+   * @returns whether the endpoint answered favorably, plus the human reason.
+   */
+  abstract probe(draft: ProviderProbeDraft): Promise<ProviderProbeResult>
 
   /** Connectivity test (config UI / diagnostics): no args, resolves the key internally. */
   abstract testConnection(): Promise<boolean>
@@ -247,6 +279,13 @@ export abstract class VideoProvider {
    * @returns the estimated USD cost, or `undefined` when unpriceable.
    */
   abstract estimateCostUsd(model: string, durationSeconds: number, resolution: string): number | undefined
+  /**
+   * Probe this backend with the values a configuration form is looking at,
+   * including a key that has not been saved.
+   * @param draft - the values the form shows.
+   * @returns whether the endpoint answered favorably, plus the human reason.
+   */
+  abstract probe(draft: ProviderProbeDraft): Promise<ProviderProbeResult>
   /** Connectivity test: no args, resolves the key internally. */
   abstract testConnection(): Promise<boolean>
 }
@@ -332,6 +371,13 @@ export abstract class MusicProvider {
   abstract submit(input: MusicGenerateInput, signal?: AbortSignal): Promise<MusicTaskHandle[]>
   /** Fetch the terminal track info for a task that polled `succeeded`. */
   abstract fetchTrack(taskId: string, signal?: AbortSignal): Promise<MusicTrackInfo>
+  /**
+   * Probe this backend with the values a configuration form is looking at,
+   * including a key that has not been saved.
+   * @param draft - the values the form shows.
+   * @returns whether the endpoint answered favorably, plus the human reason.
+   */
+  abstract probe(draft: ProviderProbeDraft): Promise<ProviderProbeResult>
   /** Connectivity test: no args, resolves the key internally. */
   abstract testConnection(): Promise<boolean>
 }

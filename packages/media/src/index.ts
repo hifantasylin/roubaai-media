@@ -40,6 +40,8 @@ export type {
   MusicTaskHandle,
   MusicTaskPoll,
   MusicTrackInfo,
+  ProviderProbeDraft,
+  ProviderProbeResult,
   VideoCaps,
   VideoGenerationResult,
   VideoGenerateInput,

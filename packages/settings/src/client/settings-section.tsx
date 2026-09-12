@@ -80,6 +80,7 @@ function displayName(provider: ResolvedMediaProvider): string {
 interface EditDraft {
   name: string
   apiKey: string
+  adapter: string
   baseUrl: string
   model: string
 }
@@ -95,7 +96,11 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
   /** Ids whose API key the redacted read reports as stored. */
   const [keySetIds, setKeySetIds] = useState<ReadonlySet<string>>(new Set())
   const [editing, setEditing] = useState<{ category: MediaCategory; providerId: string } | null>(null)
-  const [draft, setDraft] = useState<EditDraft>({ name: '', apiKey: '', baseUrl: '', model: '' })
+  const [draft, setDraft] = useState<EditDraft>({ name: '', apiKey: '', baseUrl: '', model: '', adapter: '' })
+  /** Adapters this deployment mounted, per category: a row's available choices. */
+  const [adapterChoices, setAdapterChoices] = useState<Record<MediaCategory, string[]>>({
+    image: [], video: [], music: [],
+  })
   const [error, setError] = useState<string | null>(null)
   const [outcome, setOutcome] = useState<TestResult | null>(null)
   const [busy, setBusy] = useState(false)
@@ -110,6 +115,7 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
     revisionRef.current = view.revision
     setSettings(resolveRoubaaiMediaSettings(view.value))
     setKeySetIds(keySetIdsOf(view))
+    setAdapterChoices(view.adapters ?? { image: [], video: [], music: [] })
   }, [])
 
   // Sync once on mount: another surface may have edited the section since the
@@ -174,6 +180,7 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
     setDraft({
       name: provider.name,
       apiKey: '',
+      adapter: provider.adapter,
       // A built-in provider's read-only endpoint/model resolve to the
       // category constants; a custom provider edits its stored overrides.
       baseUrl: provider.custom ? provider.baseUrl : '',
@@ -213,6 +220,8 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
     const providers = categoryView.providers.map((entry) => entry.id !== providerId ? entry : {
       ...entry,
       name: draft.name.trim(),
+      // The adapter is the routing choice for every row, built-in included.
+      adapter: draft.adapter,
       baseUrl: entry.custom ? draft.baseUrl.trim() : '',
       model: entry.custom ? draft.model.trim() : '',
     })
@@ -255,7 +264,7 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
       },
     })
     setEditing({ category, providerId: id })
-    setDraft({ name: '', apiKey: '', baseUrl: '', model: '' })
+    setDraft({ name: '', apiKey: '', adapter: MEDIA_CATEGORY_DEFAULT_ADAPTERS[category], baseUrl: '', model: '' })
   }
 
   /** Probe the edited card's endpoint with its draft key. */
@@ -268,11 +277,59 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
     const defaults = MEDIA_CATEGORY_DEFAULTS[editing.category]
     const custom = edited?.custom === true
     const base = custom && draft.baseUrl.trim() !== '' ? draft.baseUrl.trim() : edited?.baseUrl ?? defaults.baseUrl
-    void api.test(base, draft.apiKey, editing.category === 'music' ? 'music' : undefined)
+    void api.test({
+      baseUrl: base,
+      apiKey: draft.apiKey,
+      category: editing.category,
+      // The row's adapter owns the probe, so it must know which backend — and
+      // which model — the card is being edited for.
+      adapter: draft.adapter,
+      model: draft.model.trim() !== '' ? draft.model.trim() : edited?.model ?? defaults.model,
+    })
       .then((result) => { setOutcome(result) })
       .catch((caught: unknown) => { setError(`${t('testFailed')}${messageOf(caught)}`) })
       .finally(() => { setBusy(false) })
   }
+
+  /**
+   * The adapter choices for one row: what the deployment mounted, plus the
+   * row's stored value when it is not among them — editing a row whose adapter
+   * plugin is not currently mounted must not silently retarget it.
+   */
+  const adapterOptions = (category: MediaCategory, current: string): string[] => {
+    const choices = adapterChoices[category]
+    return current !== '' && !choices.includes(current) ? [current, ...choices] : [...choices]
+  }
+
+  /** The control one field renders: a select over `options`, else a text input. */
+  const control = (props: {
+    label: string
+    value: string
+    placeholder?: string
+    type?: 'text' | 'password'
+    options?: readonly string[]
+    onChange: (next: string) => void
+  }): JSX.Element => props.options === undefined
+    ? (
+      <input
+        className={css.input ?? ''}
+        type={props.type ?? 'text'}
+        value={props.value}
+        {...(props.placeholder === undefined ? {} : { placeholder: props.placeholder })}
+        aria-label={props.label}
+        onChange={(event) => { props.onChange(event.currentTarget.value) }}
+      />
+    )
+    : (
+      <select
+        className={css.input ?? ''}
+        value={props.value}
+        aria-label={props.label}
+        onChange={(event) => { props.onChange(event.currentTarget.value) }}
+      >
+        {props.options.map((option) => <option key={option} value={option}>{option}</option>)}
+      </select>
+    )
 
   /** One labeled field on the editor module: caption above, control below. */
   const field = (props: {
@@ -281,22 +338,22 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
     value: string
     placeholder?: string
     type?: 'text' | 'password'
+    /** Render a select over these values instead of a text input. */
+    options?: readonly string[]
     onChange?: (next: string) => void
   }): JSX.Element => (
     <div className={css.field}>
       <span className={css.fieldLabel}>{props.label}</span>
       {props.onChange === undefined
         ? props.value === '' ? null : <span className={css.readonlyValue}>{props.value}</span>
-        : (
-          <input
-            className={css.input ?? ''}
-            type={props.type ?? 'text'}
-            value={props.value}
-            {...(props.placeholder === undefined ? {} : { placeholder: props.placeholder })}
-            aria-label={props.label}
-            onChange={(event) => { props.onChange?.(event.currentTarget.value) }}
-          />
-        )}
+        : control({
+          label: props.label,
+          value: props.value,
+          ...props.placeholder === undefined ? {} : { placeholder: props.placeholder },
+          ...props.type === undefined ? {} : { type: props.type },
+          ...props.options === undefined ? {} : { options: props.options },
+          onChange: props.onChange,
+        })}
       {props.hint === undefined || props.hint === '' ? null : <p className={css.fieldHint}>{props.hint}</p>}
     </div>
   )
@@ -316,6 +373,7 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
             const isEditing = editing !== null && editing.category === category && editing.providerId === provider.id
             const keySet = keySetIds.has(provider.id)
             const displayModel = provider.model !== '' ? provider.model : defaults.model
+            const choices = adapterOptions(category, provider.adapter)
             return (
               <div className={css.card} key={provider.id}>
                 <div className={css.cardHeader}>
@@ -361,6 +419,17 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
                 </div>
                 {isEditing && (
                   <div className={css.cardBody}>
+                    {choices.length === 0
+                      // Nothing mounted and nothing stored: show the value the
+                      // row resolves to rather than an empty select.
+                      ? field({ label: t('adapterTitle'), hint: t('adapterHint'), value: provider.adapter })
+                      : field({
+                          label: t('adapterTitle'),
+                          hint: t('adapterHint'),
+                          value: draft.adapter,
+                          options: choices,
+                          onChange: (next) => { setDraft((previous) => ({ ...previous, adapter: next })) },
+                        })}
                     {provider.custom && field({
                       label: t('nameTitle'),
                       value: draft.name,

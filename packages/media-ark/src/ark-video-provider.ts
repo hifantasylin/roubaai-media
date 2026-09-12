@@ -20,7 +20,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { VideoProvider, readActiveMediaProvider } from '@roubaai/media'
 import type {
-  MediaProgress, MediaRef, VideoCaps, VideoGenerationResult, VideoGenerateInput, VideoTaskHandle, VideoTaskPoll,
+  MediaProgress, MediaRef, ProviderProbeDraft, ProviderProbeResult, VideoCaps, VideoGenerationResult,
+  VideoGenerateInput, VideoTaskHandle, VideoTaskPoll,
 } from '@roubaai/media'
 import { getJson, postJson, probeResult, ArkHttpError, ArkNetworkError, arkStatusMeaning, isNetworkError } from './http.ts'
 import { DEFAULT_SETTINGS_NAMESPACE } from './settings-config.ts'
@@ -438,6 +439,31 @@ export class ArkVideoProvider extends VideoProvider {
         model: handle instanceof ArkTaskHandle ? handle.model : this.defaultModel,
         taskId: handle.taskId,
       },
+    }
+  }
+
+  /**
+   * Probe the endpoint and key the configuration form holds. A read-only task
+   * lookup: an id that cannot exist answers 404, which proves the key
+   * authenticated and the service answered without creating a task.
+   */
+  async probe(draft: ProviderProbeDraft): Promise<ProviderProbeResult> {
+    if (draft.apiKey.trim() === '') return { ok: false, message: '未填写 API Key' }
+    const base = draft.baseUrl.trim().replace(/\/+$/, '')
+    if (base === '') return { ok: false, message: '未填写接口地址' }
+    try {
+      const { status } = await getJson(`${base}/contents/generations/tasks/connection-probe`, draft.apiKey)
+      if (status < 500 && status !== 401 && status !== 403) {
+        return { ok: true, message: `连接成功（HTTP ${status}）` }
+      }
+      return {
+        ok: false,
+        message: status === 401 || status === 403
+          ? `API Key 被拒绝（HTTP ${status}）`
+          : `端点返回 HTTP ${status}`,
+      }
+    } catch (error) {
+      return { ok: false, message: `无法连接端点：${error instanceof Error ? error.message : String(error)}` }
     }
   }
 

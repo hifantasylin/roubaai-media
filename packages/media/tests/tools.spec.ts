@@ -15,6 +15,7 @@ import type {
   ImageCaps,
   ImageGenerateInput,
   ImageGenerationResult,
+  ProviderProbeResult,
   VideoCaps,
   VideoGenerateInput,
   VideoGenerationResult,
@@ -56,6 +57,9 @@ class StubImageProvider extends ImageProvider {
   }
   estimateCostUsd(): number | undefined {
     return 0.009
+  }
+  async probe(): Promise<ProviderProbeResult> {
+    return { ok: true, message: 'stub' }
   }
   async testConnection(): Promise<boolean> {
     return true
@@ -104,6 +108,9 @@ class StubVideoProvider extends VideoProvider {
   }
   estimateCostUsd(): number | undefined {
     return undefined
+  }
+  async probe(): Promise<ProviderProbeResult> {
+    return { ok: true, message: 'stub' }
   }
   async testConnection(): Promise<boolean> {
     return true

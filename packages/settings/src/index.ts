@@ -34,7 +34,9 @@ import {
   MEDIA_CATEGORY_DEFAULTS,
   ROUBAAI_SETTINGS_NS,
   RoubaaiMediaSettingsSchema,
+  type MediaCategory,
 } from './config.ts'
+import { adapterCatalog, probeViaAdapter } from './adapters.ts'
 
 /**
  * Stable Cordis plugin name. Intentionally NOT the settings namespace: the
@@ -272,11 +274,12 @@ export async function testMusicConnection(
  * Register the provider-configuration namespace and mount its fenced JSON
  * route.
  *
- * Three methods share the prefix: `settings.get` (redacted view + revision),
- * `settings.update` (revision-guarded deep-merge patch), and `test` (an
- * endpoint probe against the values the caller is looking at, unsaved key
- * included; music probes a task lookup, the OpenAI-compatible categories
- * probe `/models`). The legacy migration runs once before the route mounts.
+ * Three methods share the prefix: `settings.get` (redacted view, revision, and
+ * the adapter catalog the deployment mounted), `settings.update`
+ * (revision-guarded deep-merge patch), and `test` (a probe against the values
+ * the caller is looking at, an unsaved key included — run by the row's adapter
+ * when it implements one, else by the generic endpoint probe). The legacy
+ * migration runs once before the route mounts.
  * @param ctx - plugin context carrying the webServer and settings services.
  */
 export function apply(ctx: Context): void {
@@ -294,7 +297,7 @@ export function apply(ctx: Context): void {
   }
 
   const handlers: Record<string, (payload: Record<string, unknown>) => Promise<unknown>> = {
-    'settings.get': async () => viewOf(),
+    'settings.get': async () => ({ ...viewOf(), adapters: adapterCatalog(ctx) }),
     'settings.update': async (payload) => {
       const patch = payload['patch']
       if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
@@ -320,13 +323,22 @@ export function apply(ctx: Context): void {
     'test': async (payload) => {
       // The caller supplies what it is looking at (an unsaved key included):
       // the probe runs against the card's draft rather than the last commit.
-      // Music probes a task lookup (no /models route exists there); the
-      // OpenAI-compatible categories probe /models.
       const baseUrl = typeof payload['baseUrl'] === 'string' ? payload['baseUrl'] : ''
       const apiKey = typeof payload['apiKey'] === 'string' ? payload['apiKey'] : ''
-      return payload['kind'] === 'music'
-        ? testMusicConnection(baseUrl, apiKey)
-        : testConnection(baseUrl, apiKey)
+      const kind = payload['kind']
+      const category: MediaCategory = kind === 'music' || kind === 'image' ? kind : 'video'
+      const model = typeof payload['model'] === 'string' && payload['model'].length > 0 ? payload['model'] : undefined
+      // The adapter serving the row owns its probe: only it knows which request
+      // proves reachability and key acceptance for its protocol. The generic
+      // probes below remain for a row whose adapter is absent or unmounted.
+      const adapter = typeof payload['adapter'] === 'string' ? payload['adapter'] : ''
+      const own = await probeViaAdapter(ctx, category, adapter, {
+        baseUrl,
+        apiKey,
+        ...model === undefined ? {} : { model },
+      })
+      if (own !== undefined) return own
+      return category === 'music' ? testMusicConnection(baseUrl, apiKey) : testConnection(baseUrl, apiKey)
     },
   }
 

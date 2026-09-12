@@ -17,7 +17,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { VideoProvider } from '@roubaai/media'
 import type {
-  MediaProgress, MediaRef, VideoCaps, VideoGenerationResult, VideoGenerateInput, VideoTaskHandle, VideoTaskPoll,
+  MediaProgress, MediaRef, ProviderProbeDraft, ProviderProbeResult, VideoCaps, VideoGenerationResult,
+  VideoGenerateInput, VideoTaskHandle, VideoTaskPoll,
 } from '@roubaai/media'
 import { getJson, postJson, streamBytes, MaiziHttpError, MaiziNetworkError, httpStatusMeaning } from './http.ts'
 import { MAIZI_API_KEY_REF, MissingCredentialError } from './maizi-image-provider.ts'
@@ -405,15 +406,39 @@ export class MaiziVideoProvider extends VideoProvider {
     return perSecond === undefined ? undefined : perSecond * durationSeconds
   }
 
+  /**
+   * Probe the endpoint and key the configuration form holds. A read-only task
+   * lookup: an unknown id answers a business 404, which proves reachability and
+   * key acceptance without creating a task.
+   */
+  async probe(draft: ProviderProbeDraft): Promise<ProviderProbeResult> {
+    if (draft.apiKey.trim() === '') return { ok: false, message: '未填写 API Key' }
+    const base = draft.baseUrl.trim().replace(/\/+$/, '')
+    if (base === '') return { ok: false, message: '未填写接口地址' }
+    try {
+      const { status } = await getJson(`${base}/tasks/nonexistent-probe-connection`, draft.apiKey)
+      if (status < 500 && status !== 401 && status !== 403) {
+        return { ok: true, message: `连接成功（HTTP ${status}）` }
+      }
+      return {
+        ok: false,
+        message: status === 401 || status === 403
+          ? `API Key 被拒绝（HTTP ${status}）`
+          : `端点返回 HTTP ${status}`,
+      }
+    } catch (error) {
+      return { ok: false, message: `无法连接端点：${error instanceof Error ? error.message : String(error)}` }
+    }
+  }
+
   async testConnection(): Promise<boolean> {
     try {
       const apiKey = await this.resolveKey()
-      const { status } = await postJson(
-        `${this.resolveBaseUrl()}/videos/generations`,
-        apiKey,
-        { model: this.defaultModel, prompt: 'test', duration: 4 },
-      )
-      return status >= 200 && status < 500
+      // Read-only: an unknown task id proves the key and reachability without
+      // submitting a generation, which the previous probe did — at the caller's
+      // expense, every time it ran.
+      const { status } = await getJson(`${this.resolveBaseUrl()}/tasks/nonexistent-probe-connection`, apiKey)
+      return status < 500 && status !== 401 && status !== 403
     } catch {
       return false
     }

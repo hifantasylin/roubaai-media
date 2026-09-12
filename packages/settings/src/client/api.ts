@@ -7,7 +7,7 @@
  * @module @roubaai/settings/client/api
  */
 
-import type { SettingsView, TestResult } from '../shared.ts'
+import type { MediaCategory, SettingsView, TestResult } from '../shared.ts'
 
 /** The host route prefix (kept in sync with the host half's `API_PREFIX`). */
 export const API_PREFIX = '/api/roubaai-video'
@@ -70,11 +70,21 @@ export const api = {
   /**
    * Probe one endpoint with one key — the values the caller is looking at, an
    * unsaved key included. Nothing is persisted by this call.
-   * @param baseUrl - the endpoint base to probe.
-   * @param apiKey - the key to present.
-   * @param kind - `music` probes a task lookup (the music API has no
-   * `/models`); every other category probes the OpenAI-compatible `/models`.
+   * @param draft - the endpoint, key, category, adapter, and model the card shows.
+   * @returns the probe's outcome.
    */
-  test: (baseUrl: string, apiKey: string, kind?: 'music'): Promise<TestResult> =>
-    call<TestResult>('test', { baseUrl, apiKey, ...(kind === undefined ? {} : { kind }) }),
+  test: (draft: {
+    baseUrl: string
+    apiKey: string
+    category: MediaCategory
+    adapter?: string
+    model?: string
+  }): Promise<TestResult> =>
+    call<TestResult>('test', {
+      baseUrl: draft.baseUrl,
+      apiKey: draft.apiKey,
+      kind: draft.category,
+      ...draft.adapter === undefined || draft.adapter === '' ? {} : { adapter: draft.adapter },
+      ...draft.model === undefined || draft.model === '' ? {} : { model: draft.model },
+    }),
 }

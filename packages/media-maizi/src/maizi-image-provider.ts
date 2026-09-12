@@ -12,7 +12,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { ImageProvider, readActiveMediaProvider } from '@roubaai/media'
-import type { ImageCaps, ImageGenerationResult, ImageGenerateInput, MediaProgress } from '@roubaai/media'
+import type {
+  ImageCaps, ImageGenerationResult, ImageGenerateInput, MediaProgress, ProviderProbeDraft, ProviderProbeResult,
+} from '@roubaai/media'
 import { getJson, postJson, downloadBytes, MaiziHttpError } from './http.ts'
 import { DEFAULT_SETTINGS_NAMESPACE } from './settings-config.ts'
 
@@ -443,6 +445,31 @@ export class MaiziImageProvider extends ImageProvider {
    */
   estimateCostUsd(model: string, resolution: string): number | undefined {
     return IMAGE_COST_USD[`${model}/${resolution.toLowerCase()}`] ?? IMAGE_COST_USD[`${model}/any`]
+  }
+
+  /**
+   * Probe the endpoint and key the configuration form holds. A read-only task
+   * lookup: an unknown id answers a business 404, which proves reachability and
+   * key acceptance without submitting a billable generation.
+   */
+  async probe(draft: ProviderProbeDraft): Promise<ProviderProbeResult> {
+    if (draft.apiKey.trim() === '') return { ok: false, message: '未填写 API Key' }
+    const base = draft.baseUrl.trim().replace(/\/+$/, '')
+    if (base === '') return { ok: false, message: '未填写接口地址' }
+    try {
+      const { status } = await getJson(`${base}/tasks/nonexistent-probe-connection`, draft.apiKey)
+      if (status < 500 && status !== 401 && status !== 403) {
+        return { ok: true, message: `连接成功（HTTP ${status}）` }
+      }
+      return {
+        ok: false,
+        message: status === 401 || status === 403
+          ? `API Key 被拒绝（HTTP ${status}）`
+          : `端点返回 HTTP ${status}`,
+      }
+    } catch (error) {
+      return { ok: false, message: `无法连接端点：${error instanceof Error ? error.message : String(error)}` }
+    }
   }
 
   async testConnection(): Promise<boolean> {
