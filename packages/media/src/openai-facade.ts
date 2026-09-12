@@ -572,12 +572,13 @@ type MultipartFilePart = { readonly filename?: string; readonly contentType?: st
  */
 async function listCanvasModels(ctx: Context, res: ServerResponse, url: URL): Promise<void> {
   const wanted = url.searchParams.get('capability')
-  const ids = new Set<string>()
+  // id -> the capability that serves it, so a client does not have to guess one
+  // from the model's name (which it cannot do reliably: ids carry date segments).
+  const ids = new Map<string, string>()
   type Catalogue = { defaultModel?: string; listModels?: (signal?: AbortSignal) => Promise<Array<{ id?: string; name?: string }>> }
   // Resolve through the service object itself: a provider method pulled off it and
   // called bare would lose its receiver.
-  const catalogues: Array<[string, () => Catalogue]> = [
-    ['image', () => {
+  const catalogues: Array<[string, () => Catalogue]> = [    ['image', () => {
       const adapter = readActiveAdapter(ctx, 'image')
       return (adapter === undefined ? ctx.media.image() : ctx.media.image(adapter)) as Catalogue
     }],
@@ -599,12 +600,13 @@ async function listCanvasModels(ctx: Context, res: ServerResponse, url: URL): Pr
       continue
     }
     const row = readActiveMediaProvider(ctx, MEDIA_SETTINGS_NAMESPACE, category as 'image' | 'video' | 'music')
-    if (row.model !== undefined) ids.add(row.model)
+    const capability = category === 'music' ? 'audio' : category
+    if (row.model !== undefined) ids.set(row.model, capability)
     if (typeof provider.listModels === 'function') {
       try {
         for (const info of await provider.listModels()) {
           const id = info.id ?? info.name
-          if (typeof id === 'string' && id !== '') ids.add(id)
+          if (typeof id === 'string' && id !== '') ids.set(id, capability)
         }
       } catch {
         // A backend that cannot list models is not a failed request: the row's
@@ -612,12 +614,12 @@ async function listCanvasModels(ctx: Context, res: ServerResponse, url: URL): Pr
       }
     }
     if (ids.size === 0 && typeof provider.defaultModel === 'string' && provider.defaultModel !== '') {
-      ids.add(provider.defaultModel)
+      ids.set(provider.defaultModel, capability)
     }
   }
   sendJson(res, 200, {
     object: 'list',
-    data: [...ids].map((id) => ({ id, object: 'model', created: 0, owned_by: 'roubaai' })),
+    data: [...ids].map(([id, capability]) => ({ id, object: 'model', created: 0, owned_by: 'roubaai', capability })),
   })
 }
 
