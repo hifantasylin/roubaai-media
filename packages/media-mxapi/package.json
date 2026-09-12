@@ -1,7 +1,7 @@
 {
   "name": "@roubaai/media-mxapi",
   "description": "MxAPI music provider (Suno-style v2 async generate/task) for the DeepSeek Harness media seam",
-  "version": "0.1.2-rc.4",
+  "version": "0.1.2-rc.5",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

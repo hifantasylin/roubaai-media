@@ -1,7 +1,7 @@
 {
   "name": "@roubaai/canvas",
   "description": "Host half for the canvas workbench: serves the built infinite-canvas frontend and its node plugin on the harness origin",
-  "version": "0.1.2-rc.4",
+  "version": "0.1.2-rc.5",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
