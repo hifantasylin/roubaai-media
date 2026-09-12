@@ -1,6 +1,6 @@
 {
   "name": "roubaai-media",
-  "version": "0.1.2-rc.1",
+  "version": "0.1.2-rc.3",
   "private": true,
   "description": "RoubaAI media generation plugin family for the DeepSeek Harness: a provider seam (ctx.media) plus swappable image/video/music backends and the Settings page that configures them.",
   "type": "module",

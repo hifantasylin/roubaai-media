@@ -1,7 +1,7 @@
 {
   "name": "@roubaai/settings",
   "description": "RoubaAI media provider configuration for DSH: owns the provider namespace (API keys, endpoints, models) behind a Settings page, read by the media providers before they fall back to credentials/env",
-  "version": "0.1.2-rc.1",
+  "version": "0.1.2-rc.3",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
