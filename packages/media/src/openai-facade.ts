@@ -36,15 +36,22 @@ import { extname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 // Type-only: pulls the webServer Context augmentation (ctx.webServer).
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { MEDIA_ROUTE_PREFIX, cachedMediaBytes, cachedMediaFile, downloadToCache } from './media-cache.ts'
+import { cachedMediaBytes, cachedMediaFile, downloadToCache } from './media-cache.ts'
 import { landMediaAsset } from './asset-landing.ts'
 import { appendMediaCost } from './cost-ledger.ts'
 import { fileFields, parseMultipart, textField } from './multipart.ts'
 import { MEDIA_SETTINGS_NAMESPACE, readActiveAdapter, readActiveMediaProvider } from './settings-lookup.ts'
 import type { ImageGenerateInput, ImageGenerationResult, ImageProvider, VideoGenerateInput, VideoProvider, VideoTaskHandle } from './provider.ts'
 
-/** Route prefix on the host webserver, under the media routes. */
-export const OPENAI_FACADE_PREFIX = `${MEDIA_ROUTE_PREFIX}/openai`
+/**
+ * Route prefix on the host webserver.
+ *
+ * Deliberately a sibling of the media-cache prefix rather than a child of it:
+ * the harness matches prefix routes in registration order, so a route registered
+ * under `/api/roubaai-media/...` after the cache route never runs — the cache
+ * answers first. A separate top-level prefix makes the two independent.
+ */
+export const OPENAI_FACADE_PREFIX = '/api/roubaai-openai'
 
 /**
  * Answer a CORS preflight.

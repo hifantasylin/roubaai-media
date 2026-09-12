@@ -41,7 +41,7 @@ const DEFAULT_BASE_PATH = '/canvas'
  * Where the facade listens, as the browser reaches it. The canvas is told this
  * path instead of being asked for a base URL and a key of its own.
  */
-const DEFAULT_OPENAI_BASE_PATH = '/api/roubaai-media/openai'
+const DEFAULT_OPENAI_BASE_PATH = '/api/roubaai-openai'
 
 /**
  * The package root, found by walking up to the nearest `package.json`.

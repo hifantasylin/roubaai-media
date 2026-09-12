@@ -14,8 +14,8 @@ export default function roubaaiAssets(runtime) {
   const React = runtime.React;
   const h = runtime.jsx;
 
-  const TREE = "/api/roubaai-media/assets/tree";
-  const FILE = "/api/roubaai-media/assets/file";
+  const TREE = "/api/roubaai-assets/tree";
+  const FILE = "/api/roubaai-assets/file";
   const IMAGE = [".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"];
   const VIDEO = [".mp4", ".webm", ".mov", ".mkv"];
 

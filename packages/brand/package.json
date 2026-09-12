@@ -1,7 +1,7 @@
 {
   "name": "@roubaai/brand",
   "description": "RoubaAI desktop brand occupants for the DSH Web client: fills the sidebar and conversation-hero brand slots with the Rouba DSH mark and name",
-  "version": "0.1.2-rc.3",
+  "version": "0.1.2-rc.4",
   "dsh": {
     "client": {
       "inject": [

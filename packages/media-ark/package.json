@@ -1,7 +1,7 @@
 {
   "name": "@roubaai/media-ark",
   "description": "Volcengine Ark (火山方舟) video provider for the DeepSeek Harness media seam: the vendor's own asynchronous contents/generations task API",
-  "version": "0.1.2-rc.3",
+  "version": "0.1.2-rc.4",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

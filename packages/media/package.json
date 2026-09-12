@@ -1,7 +1,7 @@
 {
   "name": "@roubaai/media",
   "description": "Media-generation capability seam (image/video/music provider registry + generate_* tools) for the DeepSeek Harness",
-  "version": "0.1.2-rc.3",
+  "version": "0.1.2-rc.4",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

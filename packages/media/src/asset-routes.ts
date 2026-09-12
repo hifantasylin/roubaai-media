@@ -27,10 +27,15 @@ import { extname, isAbsolute, join, resolve, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 // Type-only: pulls the webServer Context augmentation (ctx.webServer).
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { MEDIA_ROUTE_PREFIX } from './media-cache.ts'
 
-/** Route prefix on the host webserver, under the media routes. */
-export const ASSETS_ROUTE_PREFIX = `${MEDIA_ROUTE_PREFIX}/assets`
+/**
+ * Route prefix on the host webserver.
+ *
+ * A sibling of the media-cache prefix, not a child: the harness matches prefix
+ * routes in registration order, so a child of `/api/roubaai-media` registered
+ * after the cache route is never reached.
+ */
+export const ASSETS_ROUTE_PREFIX = '/api/roubaai-assets'
 
 const TREE_PATH = '/tree'
 const FILE_PATH = '/file'
