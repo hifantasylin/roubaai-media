@@ -164,6 +164,14 @@ describe('openai facade: image generations', () => {
     expect(status).toBe(403)
   })
 
+  it('lists the configured models in the OpenAI shape the canvas reads', async () => {
+    const { ctx } = await boot()
+    const { status, json } = await call(ctx, { path: `${OPENAI_FACADE_PREFIX}/v1/models`, method: 'GET' })
+    expect(status).toBe(200)
+    expect(json['object']).toBe('list')
+    expect((json['data'] as Array<{ id: string }>).map((model) => model.id)).toContain('stub-image-v1')
+  })
+
   it('rejects a non-POST method', async () => {
     const { ctx } = await boot()
     const { status } = await call(ctx, { method: 'GET' })

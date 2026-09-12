@@ -58,6 +58,9 @@ const VIDEO_CREATE_PATHS = new Set(['/v1/videos', '/videos'])
 const VIDEO_TASK_PATH = /^\/(?:v1\/)?videos\/([^/]+)$/
 const VIDEO_CONTENT_PATH = /^\/(?:v1\/)?videos\/([^/]+)\/content$/
 
+/** Model-catalogue endpoints (a GET, not a POST). */
+const MODEL_PATHS = new Set(['/v1/models', '/models'])
+
 /** How long a submitted video task stays addressable, in milliseconds. */
 const VIDEO_TASK_TTL_MS = 2 * 60 * 60 * 1000
 
@@ -264,6 +267,10 @@ export async function handleOpenAiRequest(
   const path = url.pathname.slice(OPENAI_FACADE_PREFIX.length) || '/'
   // Video is a task protocol: create, poll, fetch. Each verb is checked where it
   // belongs, because a poll is a GET while every other endpoint is a POST.
+  if (MODEL_PATHS.has(path)) {
+    await listCanvasModels(ctx, res, url)
+    return
+  }
   if (VIDEO_CREATE_PATHS.has(path)) {
     await createVideoTask(ctx, req, res)
     return
@@ -552,6 +559,67 @@ async function publishReferences(
 
 /** A reference part as the multipart reader hands it over. */
 type MultipartFilePart = { readonly filename?: string; readonly contentType?: string; readonly data: Buffer }
+
+/**
+ * List the models this deployment can serve, in the OpenAI shape the canvas
+ * reads from `GET {baseUrl}/models`.
+ *
+ * The catalogue belongs to the Settings page, not to the browser: the ids come
+ * from whichever backend each category is currently routed to, so the canvas
+ * offers what the deployment actually configured and never needs a model typed
+ * into it. A backend that cannot enumerate its models contributes the row's
+ * configured model, or its own default — the same fallbacks the tools use.
+ */
+async function listCanvasModels(ctx: Context, res: ServerResponse, url: URL): Promise<void> {
+  const wanted = url.searchParams.get('capability')
+  const ids = new Set<string>()
+  type Catalogue = { defaultModel?: string; listModels?: (signal?: AbortSignal) => Promise<Array<{ id?: string; name?: string }>> }
+  // Resolve through the service object itself: a provider method pulled off it and
+  // called bare would lose its receiver.
+  const catalogues: Array<[string, () => Catalogue]> = [
+    ['image', () => {
+      const adapter = readActiveAdapter(ctx, 'image')
+      return (adapter === undefined ? ctx.media.image() : ctx.media.image(adapter)) as Catalogue
+    }],
+    ['video', () => {
+      const adapter = readActiveAdapter(ctx, 'video')
+      return (adapter === undefined ? ctx.media.video() : ctx.media.video(adapter)) as Catalogue
+    }],
+    ['music', () => {
+      const adapter = readActiveAdapter(ctx, 'music')
+      return (adapter === undefined ? ctx.media.music() : ctx.media.music(adapter)) as Catalogue
+    }],
+  ]
+  for (const [category, resolve] of catalogues) {
+    if (wanted !== null && wanted !== '' && wanted !== category) continue
+    let provider: Catalogue
+    try {
+      provider = resolve()
+    } catch {
+      continue
+    }
+    const row = readActiveMediaProvider(ctx, MEDIA_SETTINGS_NAMESPACE, category as 'image' | 'video' | 'music')
+    if (row.model !== undefined) ids.add(row.model)
+    if (typeof provider.listModels === 'function') {
+      try {
+        for (const info of await provider.listModels()) {
+          const id = info.id ?? info.name
+          if (typeof id === 'string' && id !== '') ids.add(id)
+        }
+      } catch {
+        // A backend that cannot list models is not a failed request: the row's
+        // model, or the default below, still describes what runs.
+      }
+    }
+    if (ids.size === 0 && typeof provider.defaultModel === 'string' && provider.defaultModel !== '') {
+      ids.add(provider.defaultModel)
+    }
+  }
+  sendJson(res, 200, {
+    object: 'list',
+    data: [...ids].map((id) => ({ id, object: 'model', created: 0, owned_by: 'roubaai' })),
+  })
+}
 
 /** Video defaults: the shot folder and category a generated clip belongs to. */
 const DEFAULT_VIDEO_DIR = '05_视频片段'
