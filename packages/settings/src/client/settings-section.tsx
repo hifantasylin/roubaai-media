@@ -37,6 +37,7 @@ import { t } from './locales.ts'
 import {
   DEFAULT_PROVIDER_ID,
   MEDIA_CATEGORIES,
+  MEDIA_CATEGORY_DEFAULT_ADAPTERS,
   MEDIA_CATEGORY_DEFAULTS,
   ROUBAAI_REGISTER_URL,
   resolveRoubaaiMediaSettings,
@@ -247,7 +248,9 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
         ...previous[category],
         providers: [
           ...previous[category].providers,
-          { id, name: '', custom: true, baseUrl: '', model: '', apiKey: '' },
+          // A new card starts on the category's built-in backend; retargeting
+          // it at another one is a separate choice the editor owns.
+          { id, name: '', custom: true, adapter: MEDIA_CATEGORY_DEFAULT_ADAPTERS[category], baseUrl: '', model: '', apiKey: '' },
         ],
       },
     })

@@ -34,6 +34,7 @@ const MediaProviderEntrySchema: z<MediaProviderEntry> = z.object({
   id: z.string().default(''),
   name: z.string().default(''),
   custom: z.boolean().default(false),
+  adapter: z.string().default(UNSET),
   baseUrl: z.string().default(UNSET),
   model: z.string().default(UNSET),
 })

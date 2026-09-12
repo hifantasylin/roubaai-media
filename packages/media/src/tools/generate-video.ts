@@ -18,6 +18,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import type { VideoGenerateInput, VideoGenerationResult, VideoTaskPoll } from '../provider.ts'
+import { readActiveAdapter } from '../settings-lookup.ts'
 import { appendMediaCost, estimateVideoCostUsd } from '../cost-ledger.ts'
 import { downloadToCache } from '../media-cache.ts'
 import { workspaceOf } from './media-asset-save.ts'
@@ -185,7 +186,11 @@ export function registerGenerateVideo(ctx: Context): () => void {
       render: (_args, value) => [{ type: 'text', text: `Started background video job ${value.jobId} (task ${value.taskId})` }],
     },
     async execute(args, exec) {
-      const provider = ctx.media.video()
+      // Route through the backend the Settings page activated for video. An
+      // unconfigured deployment names none, and keeps whatever single provider
+      // its composition registered — the behavior it has always had.
+      const adapter = readActiveAdapter(ctx, 'video')
+      const provider = adapter === undefined ? ctx.media.video() : ctx.media.video(adapter)
       // model 必填（schema 强制）：显式模型档位，杜绝静默落到 provider 默认 mini。
       const effectiveModel = args.model
       validateVideoArgs(args, effectiveModel)
@@ -331,7 +336,9 @@ export function registerGenerateVideo(ctx: Context): () => void {
   disposers.push(ctx.tools.guard((execution: Readonly<ToolExecution>) => {
     if (execution.name !== name) return undefined
     try {
-      ctx.media.video()
+      const adapter = readActiveAdapter(ctx, 'video')
+      if (adapter === undefined) ctx.media.video()
+      else ctx.media.video(adapter)
     } catch (error) {
       if ((error as { code?: unknown } | null)?.code === 'NO_PROVIDER') {
         return 'no video provider is configured'

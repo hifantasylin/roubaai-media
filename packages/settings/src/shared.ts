@@ -35,6 +35,18 @@ export const MEDIA_CATEGORIES: readonly MediaCategory[] = ['image', 'video', 'mu
 /** The built-in provider id every category is seeded with. */
 export const DEFAULT_PROVIDER_ID = 'default'
 
+/**
+ * Registry name of the provider each category falls back to when an entry
+ * carries no adapter: the backend an unconfigured deployment has always used.
+ * A deployment that mounts a different backend set changes these through the
+ * Settings page rather than here.
+ */
+export const MEDIA_CATEGORY_DEFAULT_ADAPTERS: Readonly<Record<MediaCategory, string>> = {
+  image: 'maizi',
+  video: 'maizi',
+  music: 'mxapi',
+}
+
 /** Registration page the built-in image/video providers' key comes from. */
 export const ROUBAAI_REGISTER_URL = 'https://www.maizitech.net/register?invite_code=664KPT'
 
@@ -67,6 +79,13 @@ export interface MediaProviderEntry {
   name: string
   /** Whether this is a user-added custom provider (endpoint/model editable). */
   custom: boolean
+  /**
+   * Registry name of the provider that serves this entry. `@roubaai/media`
+   * resolves an operation's provider by this name, so several entries may
+   * target different backends while only the active one runs. Empty resolves to
+   * the category's built-in adapter; the display name is `name`, never this.
+   */
+  adapter: string
   /** Endpoint base override; empty uses the category's built-in default. */
   baseUrl: string
   /** Model id override; empty uses the category's built-in default. */
@@ -139,7 +158,14 @@ export interface TestResult {
 
 /** Build the built-in default provider entry for one category. */
 export function defaultProviderEntry(category: MediaCategory): MediaProviderEntry {
-  return { id: `${DEFAULT_PROVIDER_ID}:${category}`, name: '', custom: false, baseUrl: UNSET, model: UNSET }
+  return {
+    id: `${DEFAULT_PROVIDER_ID}:${category}`,
+    name: '',
+    custom: false,
+    adapter: MEDIA_CATEGORY_DEFAULT_ADAPTERS[category],
+    baseUrl: UNSET,
+    model: UNSET,
+  }
 }
 
 /**
@@ -180,7 +206,7 @@ function resolveCategory(value: unknown, category: MediaCategory, keys: Record<s
   const rawProviders = Array.isArray(source['providers']) ? source['providers'] : []
   const providers: ResolvedMediaProvider[] = []
   for (const raw of rawProviders) {
-    const entry = resolveEntry(raw, keys)
+    const entry = resolveEntry(raw, keys, category)
     if (entry !== undefined && !providers.some((existing) => existing.id === entry.id)) {
       providers.push(entry)
     }
@@ -203,16 +229,24 @@ function resolveCategory(value: unknown, category: MediaCategory, keys: Record<s
 }
 
 /** Narrow one provider entry; `undefined` rejects a non-object row. */
-function resolveEntry(value: unknown, keys: Record<string, string>): ResolvedMediaProvider | undefined {
+function resolveEntry(
+  value: unknown,
+  keys: Record<string, string>,
+  category: MediaCategory,
+): ResolvedMediaProvider | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const record = value as Record<string, unknown>
   const id = typeof record['id'] === 'string' && record['id'].length > 0 ? record['id'] : undefined
   if (id === undefined) return undefined
   const string = (key: string): string => typeof record[key] === 'string' ? record[key] as string : UNSET
+  const adapter = string('adapter')
   return {
     id,
     name: string('name'),
     custom: record['custom'] === true,
+    // An entry stored before adapters existed carries none; it resolves to the
+    // category default, which is the backend such a document has always run.
+    adapter: adapter === UNSET ? MEDIA_CATEGORY_DEFAULT_ADAPTERS[category] : adapter,
     baseUrl: string('baseUrl'),
     model: string('model'),
     apiKey: keys[id] ?? UNSET,

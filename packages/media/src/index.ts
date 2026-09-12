@@ -27,7 +27,7 @@ import { registerMediaCostSummary } from './tools/media-cost-summary.ts'
 import './job-kind.ts'
 
 export { ImageProvider, MusicProvider, VideoProvider } from './provider.ts'
-export { readActiveMediaProvider } from './settings-lookup.ts'
+export { MEDIA_SETTINGS_NAMESPACE, readActiveAdapter, readActiveMediaProvider } from './settings-lookup.ts'
 export type { ActiveMediaProvider, MediaSettingsCategory } from './settings-lookup.ts'
 export type {
   ImageGenerationResult,

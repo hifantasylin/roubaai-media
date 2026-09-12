@@ -9,3 +9,7 @@ dist/
 
 # Electron/crashpad diagnostics written into the cwd by tool shims.
 debug.log
+
+# Media asset library root the generate_* tools write into; a spec that runs
+# with the repository as its workspace leaves one behind.
+.assets/

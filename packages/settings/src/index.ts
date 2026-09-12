@@ -30,6 +30,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-settings'
 import {
   DEFAULT_PROVIDER_ID,
+  MEDIA_CATEGORY_DEFAULT_ADAPTERS,
   MEDIA_CATEGORY_DEFAULTS,
   ROUBAAI_SETTINGS_NS,
   RoubaaiMediaSettingsSchema,
@@ -198,16 +199,23 @@ async function migrateLegacySettings(ctx: Context): Promise<void> {
   await ctx.settings.replace(ROUBAAI_SETTINGS_NS, {
     image: {
       activeId: DEFAULT_PROVIDER_ID,
-      providers: [{ id: `${DEFAULT_PROVIDER_ID}:image`, name: '', custom: false, baseUrl, model: string('imageModel') }],
+      providers: [{
+        id: `${DEFAULT_PROVIDER_ID}:image`, name: '', custom: false,
+        adapter: MEDIA_CATEGORY_DEFAULT_ADAPTERS.image, baseUrl, model: string('imageModel'),
+      }],
     },
     video: {
       activeId: DEFAULT_PROVIDER_ID,
-      providers: [{ id: `${DEFAULT_PROVIDER_ID}:video`, name: '', custom: false, baseUrl, model: string('videoModel') }],
+      providers: [{
+        id: `${DEFAULT_PROVIDER_ID}:video`, name: '', custom: false,
+        adapter: MEDIA_CATEGORY_DEFAULT_ADAPTERS.video, baseUrl, model: string('videoModel'),
+      }],
     },
     music: {
       activeId: DEFAULT_PROVIDER_ID,
       providers: [{
         id: `${DEFAULT_PROVIDER_ID}:music`, name: '', custom: false,
+        adapter: MEDIA_CATEGORY_DEFAULT_ADAPTERS.music,
         baseUrl: MEDIA_CATEGORY_DEFAULTS.music.baseUrl, model: string('musicModel'),
       }],
     },

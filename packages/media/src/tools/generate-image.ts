@@ -16,6 +16,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView, ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import type { ImageGenerateInput } from '../provider.ts'
+import { readActiveAdapter } from '../settings-lookup.ts'
 import { appendMediaCost, estimateImageCostUsd } from '../cost-ledger.ts'
 import { workspaceOf } from './media-asset-save.ts'
 
@@ -57,7 +58,11 @@ export function registerGenerateImage(ctx: Context): () => void {
       if (args.prompt.trim().length === 0) {
         throw new Error('generate_image: prompt must be a non-empty string')
       }
-      const provider = ctx.media.image()
+      // Route through the backend the Settings page activated for images. An
+      // unconfigured deployment names none, and keeps whatever single provider
+      // its composition registered — the behavior it has always had.
+      const adapter = readActiveAdapter(ctx, 'image')
+      const provider = adapter === undefined ? ctx.media.image() : ctx.media.image(adapter)
       const input: ImageGenerateInput = {
         prompt: args.prompt,
         ...args.refImages !== undefined ? { refImages: args.refImages } : {},
@@ -136,7 +141,9 @@ export function registerGenerateImage(ctx: Context): () => void {
   disposers.push(ctx.tools.guard((execution: Readonly<ToolExecution>) => {
     if (execution.name !== name) return undefined
     try {
-      ctx.media.image()
+      const adapter = readActiveAdapter(ctx, 'image')
+      if (adapter === undefined) ctx.media.image()
+      else ctx.media.image(adapter)
     } catch (error) {
       if ((error as { code?: unknown } | null)?.code === 'NO_PROVIDER') {
         return 'no image provider is configured'

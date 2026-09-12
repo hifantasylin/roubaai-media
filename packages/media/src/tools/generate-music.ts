@@ -22,6 +22,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView, ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import type { MusicGenerateInput, MusicGenerationResult } from '../provider.ts'
+import { readActiveAdapter } from '../settings-lookup.ts'
 import { appendMediaCost } from '../cost-ledger.ts'
 import { downloadToCache } from '../media-cache.ts'
 import { workspaceOf } from './media-asset-save.ts'
@@ -136,7 +137,11 @@ export function registerGenerateMusic(ctx: Context): () => void {
     },
     async execute(args, exec) {
       validateMusicArgs(args)
-      const provider = ctx.media.music()
+      // Route through the backend the Settings page activated for music. An
+      // unconfigured deployment names none, and keeps whatever single provider
+      // its composition registered — the behavior it has always had.
+      const adapter = readActiveAdapter(ctx, 'music')
+      const provider = adapter === undefined ? ctx.media.music() : ctx.media.music(adapter)
       const input: MusicGenerateInput = {
         ...args.description !== undefined ? { description: args.description } : {},
         ...args.lyrics !== undefined ? { lyrics: args.lyrics } : {},
@@ -268,7 +273,9 @@ export function registerGenerateMusic(ctx: Context): () => void {
   disposers.push(ctx.tools.guard((execution: Readonly<ToolExecution>) => {
     if (execution.name !== name) return undefined
     try {
-      ctx.media.music()
+      const adapter = readActiveAdapter(ctx, 'music')
+      if (adapter === undefined) ctx.media.music()
+      else ctx.media.music(adapter)
     } catch (error) {
       if ((error as { code?: unknown } | null)?.code === 'NO_PROVIDER') {
         return 'no music provider is configured'
