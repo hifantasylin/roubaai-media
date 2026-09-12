@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`@roubaai/settings` owns the configuration surface of the media stack. Its host half registers the `roubaai-video-plugin` settings namespace and serves it through the plugin's own fenced JSON route; its browser half contributes the Settings page section where a person enters the provider key, endpoint, image model, and video model, and runs a connection test. The media providers read those values per operation, so editing the page takes effect without a restart and without touching the environment. Choose this package when a deployment should let someone configure media generation from the browser instead of exporting an API key.
+`@roubaai/settings` owns the configuration surface of the media stack. Its host half registers the `roubaai-video-plugin` settings namespace and serves it through the plugin's own fenced JSON route; its browser half contributes the Settings page section where a person configures a provider row — its key, endpoint, model, and **adapter** — and runs a connection test. The media providers read those values per operation, so editing the page takes effect without a restart and without touching the environment. The adapter is what selects a backend: several may be mounted at once, and the tools route to whichever one the active row names. Choose this package when a deployment should let someone configure media generation from the browser instead of exporting an API key.
 
 ## Table of Contents
 
@@ -38,8 +38,11 @@ The row takes no configuration of its own; every value it manages is edited on t
 | Field | Role |
 |---|---|
 | API key | A `secret`-role field: written, never returned to the browser. The page shows whether one is saved, never its value. |
+| Adapter | The registry name of the backend that serves this row (`maizi`, `ark`, `mxapi`). The choices are the adapters this deployment mounted, read from `ctx.media`; a row whose stored adapter is no longer mounted keeps it as the only choice, so an edit cannot silently retarget the row. Empty resolves to the category's built-in adapter. |
 | Endpoint base | Overrides the provider's default API base; empty means the provider default. |
 | Image model / Video model | Override the model each generation uses; empty means the provider's configured default. |
+
+**Test connection** runs against the values the card shows, an unsaved key included. The row's adapter owns the probe: a provider implements `probe(draft)` because only it knows which request proves reachability and key acceptance for its own protocol. A row whose adapter is unmounted, or whose provider implements no probe, falls back to the route's generic endpoint probe.
 
 <a id="understand-the-implementation"></a>
 ## Understand the implementation
@@ -54,10 +57,10 @@ The contract with the providers is deliberately data-only: they read the namespa
 ## Further Exploration
 
 - [`media-maizi/`](../media-maizi/README.md) — the image and video backend whose key, endpoint, and models this page configures.
+- [`media-ark/`](../media-ark/README.md) — the video backend a row selects by naming `ark` as its adapter.
 - [`media-mxapi/`](../media-mxapi/README.md) — the music backend reading the same namespace.
-- [Media subsystem reference](../../../docs/subsystems/media.md) — the provider registry these values feed.
+- [`media/`](../media/README.md) — the provider registry these values feed, and the tools that route by adapter.
 
-<a id="model-experience"></a>
 <a id="model-experience"></a>
 ## Model Experience
 
