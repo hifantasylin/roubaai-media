@@ -39,6 +39,10 @@ export const ASSETS_ROUTE_PREFIX = '/api/roubaai-assets'
 
 const TREE_PATH = '/tree'
 const FILE_PATH = '/file'
+/** Lists the projects that carry a production blueprint, newest first. */
+const BLUEPRINTS_PATH = '/blueprints'
+/** The file a project's blueprint lives in. */
+const BLUEPRINT_FILE = 'canvas-blueprint.json'
 
 /** Most entries one listing returns; a directory past this says it truncated. */
 const MAX_ENTRIES = 500
@@ -175,6 +179,38 @@ async function serveTree(res: ServerResponse, requested: string): Promise<void> 
   })
 }
 
+/**
+ * List the projects that carry a blueprint, newest first.
+ *
+ * The canvas uses this to fill an empty canvas with the plan that was just
+ * written, without being told which project: the newest blueprint is the one the
+ * host produced for the work at hand.
+ * @param res - the response to write.
+ */
+async function serveBlueprints(res: ServerResponse): Promise<void> {
+  const root = assetsRoot()
+  let dirents
+  try {
+    dirents = await readdir(root, { withFileTypes: true })
+  } catch {
+    sendJson(res, 200, { ok: true, blueprints: [] })
+    return
+  }
+  const blueprints: Array<{ project: string; mtime: number; bytes: number }> = []
+  for (const dirent of dirents.slice(0, MAX_ENTRIES)) {
+    if (!dirent.isDirectory()) continue
+    const file = join(root, dirent.name, BLUEPRINT_FILE)
+    try {
+      const info = await stat(file)
+      if (info.isFile()) blueprints.push({ project: dirent.name, mtime: info.mtimeMs, bytes: info.size })
+    } catch {
+      // A project without a blueprint is the ordinary case, not an error.
+    }
+  }
+  blueprints.sort((a, b) => b.mtime - a.mtime)
+  sendJson(res, 200, { ok: true, blueprints })
+}
+
 /** Stream one file of the asset tree, honouring a single byte range. */
 async function serveFile(req: IncomingMessage, res: ServerResponse, requested: string): Promise<void> {
   const target = resolveAssetPath(requested)
@@ -227,6 +263,10 @@ export async function handleAssetsRequest(req: IncomingMessage, res: ServerRespo
   const requested = url.searchParams.get('path') ?? ''
   if (path === TREE_PATH) {
     await serveTree(res, requested)
+    return
+  }
+  if (path === BLUEPRINTS_PATH) {
+    await serveBlueprints(res)
     return
   }
   if (path === FILE_PATH) {
