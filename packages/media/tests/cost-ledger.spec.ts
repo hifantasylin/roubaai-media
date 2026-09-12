@@ -4,8 +4,6 @@ import { join } from 'node:path'
 import { beforeEach, afterEach, describe, expect, it } from 'vitest'
 import {
   appendMediaCost,
-  estimateImageCostUsd,
-  estimateVideoCostUsd,
   summarizeMediaCost,
 } from '../src/cost-ledger.ts'
 
@@ -18,19 +16,6 @@ describe('cost-ledger', () => {
 
   afterEach(async () => {
     await rm(dir, { recursive: true, force: true })
-  })
-
-  it('estimates image cost from model + resolution', () => {
-    expect(estimateImageCostUsd('gpt-image-2', '1K')).toBe(0.009)
-    expect(estimateImageCostUsd('gpt-image-2', '4K')).toBe(0.044)
-    expect(estimateImageCostUsd('nano-banana-2', 'any')).toBe(0.018)
-    expect(estimateImageCostUsd('unknown-model', '1K')).toBeUndefined()
-  })
-
-  it('estimates video cost from model + duration + resolution', () => {
-    expect(estimateVideoCostUsd('doubao-seedance-2.0-fast', 4, '480p')).toBeCloseTo(0.2548)
-    expect(estimateVideoCostUsd('doubao-seedance-2.5', 5, '720p')).toBeCloseTo(1.35)
-    expect(estimateVideoCostUsd('doubao-seedance-2.0', 4, '9999p')).toBeUndefined()
   })
 
   it('flags the second occurrence of the same (project, label) as a retry', async () => {

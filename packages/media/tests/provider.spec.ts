@@ -8,8 +8,10 @@ import {
   NoProviderError,
 } from '../src/index.ts'
 import type {
+  ImageCaps,
   ImageGenerateInput,
   ImageGenerationResult,
+  VideoCaps,
   VideoGenerateInput,
   VideoGenerationResult,
   VideoTaskHandle,
@@ -34,6 +36,12 @@ class StubImageProvider extends ImageProvider {
       providerMeta: { provider: this.provider, model: this.defaultModel },
     }
   }
+  caps(): ImageCaps {
+    return { maxRefImages: 9 }
+  }
+  estimateCostUsd(): number | undefined {
+    return undefined
+  }
   async testConnection(): Promise<boolean> {
     return true
   }
@@ -55,6 +63,12 @@ class StubVideoProvider extends VideoProvider {
       mediaRef: { url: 'https://stub.invalid/v.mp4', mediaType: 'video/mp4', expiresAt: Date.now() + 86_400_000 },
       providerMeta: { provider: this.provider, model: this.defaultModel, taskId: 'stub-task' },
     }
+  }
+  caps(): VideoCaps {
+    return { minDuration: 4, maxDuration: 15, maxImageUrls: 9, maxVideoUrls: 3, maxAudioUrls: 3 }
+  }
+  estimateCostUsd(): number | undefined {
+    return undefined
   }
   async testConnection(): Promise<boolean> {
     return true

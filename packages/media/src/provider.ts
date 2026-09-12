@@ -96,6 +96,34 @@ export interface ImageGenerateInput {
   extra?: Record<string, unknown>
 }
 
+/**
+ * Bounds one provider enforces for an image request. The tool validates against
+ * them before submitting, so a request the backend would reject costs nothing.
+ */
+export interface ImageCaps {
+  /** Most reference images one request may carry. */
+  maxRefImages: number
+}
+
+/**
+ * Bounds one provider enforces for a video request. Answered per model: a
+ * backend whose newer generation accepts longer clips or more references
+ * declares that itself, instead of the shared tool guessing from a model-name
+ * pattern that only fits one vendor's naming.
+ */
+export interface VideoCaps {
+  /** Shortest accepted duration in seconds. */
+  minDuration: number
+  /** Longest accepted duration in seconds. */
+  maxDuration: number
+  /** Most reference images one request may carry. */
+  maxImageUrls: number
+  /** Most reference videos one request may carry. */
+  maxVideoUrls: number
+  /** Most reference audio clips one request may carry. */
+  maxAudioUrls: number
+}
+
 export abstract class ImageProvider {
   abstract readonly provider: string
   abstract readonly defaultModel: string
@@ -106,6 +134,20 @@ export abstract class ImageProvider {
     signal?: AbortSignal,
     onProgress?: (progress: MediaProgress) => void,
   ): Promise<ImageGenerationResult>
+
+  /** Bounds this provider enforces for the given model (its default when omitted). */
+  abstract caps(model?: string): ImageCaps
+
+  /**
+   * Estimated USD for one generation at this model and resolution, or
+   * `undefined` when this provider cannot price it. Pricing belongs to the
+   * provider: the shared tool records what a backend charges, so it owns no
+   * rate table of its own.
+   * @param model - the model the run used.
+   * @param resolution - the requested resolution tier ('1K', '2K', '4K').
+   * @returns the estimated USD cost, or `undefined` when unpriceable.
+   */
+  abstract estimateCostUsd(model: string, resolution: string): number | undefined
 
   /** Connectivity test (config UI / diagnostics): no args, resolves the key internally. */
   abstract testConnection(): Promise<boolean>
@@ -194,6 +236,17 @@ export abstract class VideoProvider {
     signal?: AbortSignal,
     onProgress?: (progress: MediaProgress) => void,
   ): Promise<VideoGenerationResult>
+  /** Bounds this provider enforces for the given model (its default when omitted). */
+  abstract caps(model?: string): VideoCaps
+  /**
+   * Estimated USD for one generation at this model, duration and resolution, or
+   * `undefined` when this provider cannot price it.
+   * @param model - the model the run used.
+   * @param durationSeconds - the requested duration.
+   * @param resolution - the requested resolution tier ('480p', '720p', '1080p').
+   * @returns the estimated USD cost, or `undefined` when unpriceable.
+   */
+  abstract estimateCostUsd(model: string, durationSeconds: number, resolution: string): number | undefined
   /** Connectivity test: no args, resolves the key internally. */
   abstract testConnection(): Promise<boolean>
 }

@@ -12,7 +12,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { ImageProvider, readActiveMediaProvider } from '@roubaai/media'
-import type { ImageGenerationResult, ImageGenerateInput, MediaProgress } from '@roubaai/media'
+import type { ImageCaps, ImageGenerationResult, ImageGenerateInput, MediaProgress } from '@roubaai/media'
 import { getJson, postJson, downloadBytes, MaiziHttpError } from './http.ts'
 import { DEFAULT_SETTINGS_NAMESPACE } from './settings-config.ts'
 
@@ -39,6 +39,18 @@ const IMAGE_POLL_INTERVAL_MS = 5_000
 
 /** Max reference images (Maizi hard cap). */
 const MAX_REF_IMAGES = 9
+
+/**
+ * USD per image, keyed `model/resolution`. A matching `any` entry covers a
+ * model Maizi prices flat across resolution tiers.
+ */
+const IMAGE_COST_USD: Record<string, number> = {
+  'gpt-image-2/1k': 0.009,
+  'gpt-image-2/2k': 0.029,
+  'gpt-image-2/4k': 0.044,
+  'nano-banana-fast/1k': 0.009,
+  'nano-banana-2/any': 0.018,
+}
 
 /** Upper bound on a downloaded image result (Maizi results are a few MB). */
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -417,6 +429,20 @@ export class MaiziImageProvider extends ImageProvider {
         model,
       },
     }
+  }
+
+  /** Reference images Maizi accepts on one image request. */
+  caps(): ImageCaps {
+    return { maxRefImages: MAX_REF_IMAGES }
+  }
+
+  /**
+   * Maizi's image rates, in USD per image, keyed `model/resolution`. A matching
+   * `any` entry covers a model Maizi prices flat across tiers; a model absent
+   * from both is unpriced and returns `undefined`.
+   */
+  estimateCostUsd(model: string, resolution: string): number | undefined {
+    return IMAGE_COST_USD[`${model}/${resolution.toLowerCase()}`] ?? IMAGE_COST_USD[`${model}/any`]
   }
 
   async testConnection(): Promise<boolean> {

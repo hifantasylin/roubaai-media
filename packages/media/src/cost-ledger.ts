@@ -34,36 +34,6 @@ export interface MediaCostEntry {
   retry: boolean
 }
 
-/** Image rate table keyed `model/resolution`; a matching `any` entry covers unknown resolutions. */
-const IMAGE_COST_USD: Record<string, number> = {
-  'gpt-image-2/1k': 0.009,
-  'gpt-image-2/2k': 0.029,
-  'gpt-image-2/4k': 0.044,
-  'nano-banana-fast/1k': 0.009,
-  'nano-banana-2/any': 0.018,
-}
-
-/** Video rate table keyed `model/resolution`; USD per second. */
-const VIDEO_COST_USD_PER_SECOND: Record<string, number> = {
-  'doubao-seedance-2.0-fast/480p': 0.0637,
-  'doubao-seedance-2.0-fast/720p': 0.137,
-  'doubao-seedance-2.0/480p': 0.0792,
-  'doubao-seedance-2.0/720p': 0.1704,
-  'doubao-seedance-2.0/1080p': 0.4253,
-  'doubao-seedance-2.5/480p': 0.1201,
-  'doubao-seedance-2.5/720p': 0.27,
-}
-
-/** Estimate an image's USD cost from its model and resolution, when known. */
-export function estimateImageCostUsd(model: string, resolution: string): number | undefined {
-  return IMAGE_COST_USD[`${model}/${resolution.toLowerCase()}`] ?? IMAGE_COST_USD[`${model}/any`]
-}
-
-/** Estimate a video's USD cost from its model, duration and resolution, when known. */
-export function estimateVideoCostUsd(model: string, duration: number, resolution: string): number | undefined {
-  const perSecond = VIDEO_COST_USD_PER_SECOND[`${model}/${resolution}`]
-  return perSecond === undefined ? undefined : perSecond * duration
-}
 
 /**
  * Ledger file for one project: `<workspace>/.assets/<project>/media-cost.jsonl`.

@@ -17,7 +17,7 @@ import type { GenericCallView, ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import type { ImageGenerateInput } from '../provider.ts'
 import { readActiveAdapter } from '../settings-lookup.ts'
-import { appendMediaCost, estimateImageCostUsd } from '../cost-ledger.ts'
+import { appendMediaCost } from '../cost-ledger.ts'
 import { workspaceOf } from './media-asset-save.ts'
 
 export const name = 'generate_image'
@@ -83,8 +83,8 @@ export function registerGenerateImage(ctx: Context): () => void {
             try {
               const result = await provider.generate(input, ac.signal)
               // Automatic cost accounting: images report no USD cost, so the
-              // ledger estimates from the rate table by the model the result
-              // names + resolution. A ledger write failure must never fail the
+              // provider prices the run by the model the result names and the
+              // resolution. A ledger write failure must never fail the
               // generation itself.
               try {
                 const workspace = workspaceOf(exec.agent)
@@ -94,7 +94,7 @@ export function registerGenerateImage(ctx: Context): () => void {
                 // in the result. Reading `defaultModel` here would bill the
                 // default's rate for a run that used another model.
                 const model = result.providerMeta?.model ?? provider.defaultModel
-                const costUsd = estimateImageCostUsd(model, args.resolution ?? '1K')
+                const costUsd = provider.estimateCostUsd(model, args.resolution ?? '1K')
                 await appendMediaCost(workspace, {
                   ts: Date.now(),
                   tool: 'image',

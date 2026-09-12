@@ -17,7 +17,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { VideoProvider } from '@roubaai/media'
 import type {
-  MediaProgress, MediaRef, VideoGenerationResult, VideoGenerateInput, VideoTaskHandle, VideoTaskPoll,
+  MediaProgress, MediaRef, VideoCaps, VideoGenerationResult, VideoGenerateInput, VideoTaskHandle, VideoTaskPoll,
 } from '@roubaai/media'
 import { getJson, postJson, streamBytes, MaiziHttpError, MaiziNetworkError, httpStatusMeaning } from './http.ts'
 import { MAIZI_API_KEY_REF, MissingCredentialError } from './maizi-image-provider.ts'
@@ -40,19 +40,29 @@ const MEDIA_URL_TTL_MS = 24 * 60 * 60_000
 /** Bound on the result-URL probe in `finalize` (a hung CDN must not block forever). */
 const VIDEO_PROBE_TIMEOUT_MS = 30_000
 
-/** Seedance 2.0 系素材上限（doubao-seedance-2.0 / -mini / -fast）。 */
-interface MediaCaps {
-  maxImageUrls: number
-  maxVideoUrls: number
-  maxAudioUrls: number
-}
-const CAPS_2_0: MediaCaps = { maxImageUrls: 9, maxVideoUrls: 3, maxAudioUrls: 3 }
-/** Seedance 2.5 系素材上限（doubao-seedance-2.5）。 */
-const CAPS_2_5: MediaCaps = { maxImageUrls: 30, maxVideoUrls: 10, maxAudioUrls: 10 }
+/** Seedance 2.0 系上限（doubao-seedance-2.0 / -mini / -fast）。 */
+const CAPS_2_0: VideoCaps = { minDuration: 4, maxDuration: 15, maxImageUrls: 9, maxVideoUrls: 3, maxAudioUrls: 3 }
+/** Seedance 2.5 系上限（doubao-seedance-2.5）。 */
+const CAPS_2_5: VideoCaps = { minDuration: 4, maxDuration: 30, maxImageUrls: 30, maxVideoUrls: 10, maxAudioUrls: 10 }
 
 /** 判定模型代际：2.5 系用 2.5 上限，其余（2.0 系/未知）用 2.0 上限保守处理。 */
-function capsForModel(model: string): MediaCaps {
+function capsForModel(model: string): VideoCaps {
   return model.includes('2.5') ? CAPS_2_5 : CAPS_2_0
+}
+
+/**
+ * USD per second, keyed `model/resolution`: Maizi's published Seedance rates.
+ * A model or tier absent here is unpriced, and the ledger then records the run
+ * without an estimate rather than with a wrong one.
+ */
+const VIDEO_COST_USD_PER_SECOND: Record<string, number> = {
+  'doubao-seedance-2.0-fast/480p': 0.0637,
+  'doubao-seedance-2.0-fast/720p': 0.137,
+  'doubao-seedance-2.0/480p': 0.0792,
+  'doubao-seedance-2.0/720p': 0.1704,
+  'doubao-seedance-2.0/1080p': 0.4253,
+  'doubao-seedance-2.5/480p': 0.1201,
+  'doubao-seedance-2.5/720p': 0.27,
 }
 
 /** One Maizi video task payload from `GET /v1/tasks/{id}`. */
@@ -375,6 +385,24 @@ export class MaiziVideoProvider extends VideoProvider {
         ...costUsd !== undefined ? { costUsd } : {},
       },
     }
+  }
+
+  /**
+   * Bounds for the model being asked for. An omitted model resolves to the one
+   * this provider would use anyway, so a caller that never names a model still
+   * validates against the right generation.
+   */
+  caps(model?: string): VideoCaps {
+    return capsForModel(model ?? this.resolveModel())
+  }
+
+  /**
+   * Maizi's Seedance rates, in USD per second. A tier Maizi does not price
+   * returns `undefined`; the tool then records the run without an estimate.
+   */
+  estimateCostUsd(model: string, durationSeconds: number, resolution: string): number | undefined {
+    const perSecond = VIDEO_COST_USD_PER_SECOND[`${model}/${resolution}`]
+    return perSecond === undefined ? undefined : perSecond * durationSeconds
   }
 
   async testConnection(): Promise<boolean> {

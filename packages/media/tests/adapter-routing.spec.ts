@@ -16,7 +16,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { ImageProvider, MEDIA_SETTINGS_NAMESPACE, MediaRuntimeLocal, readActiveAdapter } from '../src/index.ts'
 import { registerGenerateImage } from '../src/tools/generate-image.ts'
-import type { ImageGenerateInput, ImageGenerationResult } from '../src/index.ts'
+import type { ImageCaps, ImageGenerateInput, ImageGenerationResult } from '../src/index.ts'
 
 const testToolSignal = new AbortController().signal
 
@@ -57,6 +57,12 @@ class RecordingImageProvider extends ImageProvider {
       mediaType: 'image/png',
       providerMeta: { provider: this.provider, model: this.defaultModel },
     }
+  }
+  caps(): ImageCaps {
+    return { maxRefImages: 9 }
+  }
+  estimateCostUsd(): number | undefined {
+    return undefined
   }
   async testConnection(): Promise<boolean> {
     return true

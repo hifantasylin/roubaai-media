@@ -12,8 +12,10 @@ import { ledgerPath } from '../src/cost-ledger.ts'
 import { registerGenerateImage } from '../src/tools/generate-image.ts'
 import { registerGenerateVideo } from '../src/tools/generate-video.ts'
 import type {
+  ImageCaps,
   ImageGenerateInput,
   ImageGenerationResult,
+  VideoCaps,
   VideoGenerateInput,
   VideoGenerationResult,
   VideoTaskHandle,
@@ -48,6 +50,12 @@ class StubImageProvider extends ImageProvider {
       mediaType: 'image/png',
       providerMeta: { provider: this.provider, model: this.reportedModel ?? this.defaultModel },
     }
+  }
+  caps(): ImageCaps {
+    return { maxRefImages: 9 }
+  }
+  estimateCostUsd(): number | undefined {
+    return 0.009
   }
   async testConnection(): Promise<boolean> {
     return true
@@ -85,6 +93,17 @@ class StubVideoProvider extends VideoProvider {
       },
       providerMeta: { provider: this.provider, model: this.defaultModel, taskId: 'task-1' },
     }
+  }
+  caps(model?: string): VideoCaps {
+    // Mirrors the generation split a real backend declares per model: the tool
+    // no longer derives caps from a model-name pattern, so the provider answers
+    // for whichever model it is asked about.
+    return (model ?? this.defaultModel).includes('2.5')
+      ? { minDuration: 4, maxDuration: 30, maxImageUrls: 30, maxVideoUrls: 10, maxAudioUrls: 10 }
+      : { minDuration: 4, maxDuration: 15, maxImageUrls: 9, maxVideoUrls: 3, maxAudioUrls: 3 }
+  }
+  estimateCostUsd(): number | undefined {
+    return undefined
   }
   async testConnection(): Promise<boolean> {
     return true

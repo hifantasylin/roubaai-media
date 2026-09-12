@@ -17,32 +17,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
-import type { VideoGenerateInput, VideoGenerationResult, VideoTaskPoll } from '../provider.ts'
+import type { VideoCaps, VideoGenerateInput, VideoGenerationResult, VideoTaskPoll } from '../provider.ts'
 import { readActiveAdapter } from '../settings-lookup.ts'
-import { appendMediaCost, estimateVideoCostUsd } from '../cost-ledger.ts'
+import { appendMediaCost } from '../cost-ledger.ts'
 import { downloadToCache } from '../media-cache.ts'
 import { workspaceOf } from './media-asset-save.ts'
 
 export const name = 'generate_video'
-
-/** Maizi hard caps mirrored here so the tool refuses before a provider call. */
-const MIN_DURATION = 4
-
-/** Seedance 2.0 系上限（doubao-seedance-2.0 / -mini / -fast）。 */
-interface ModelCaps {
-  maxDuration: number
-  maxImageUrls: number
-  maxVideoUrls: number
-  maxAudioUrls: number
-}
-const CAPS_2_0: ModelCaps = { maxDuration: 15, maxImageUrls: 9, maxVideoUrls: 3, maxAudioUrls: 3 }
-/** Seedance 2.5 系上限（doubao-seedance-2.5）。 */
-const CAPS_2_5: ModelCaps = { maxDuration: 30, maxImageUrls: 30, maxVideoUrls: 10, maxAudioUrls: 10 }
-
-/** 判定模型代际：2.5 系用 2.5 上限，其余（2.0 系/未知）用 2.0 上限保守处理。 */
-function capsForModel(model: string | undefined): ModelCaps {
-  return model !== undefined && model.includes('2.5') ? CAPS_2_5 : CAPS_2_0
-}
 
 /** Poll interval between provider polls inside the background task. */
 const POLL_INTERVAL_MS = 10_000
@@ -99,11 +80,10 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Validate value constraints the schema DSL does not express: the billing caps
- * (duration/imageUrls/videoUrls/audioUrls) and the default-off flags. Caps are
- * **model-aware** — Seedance 2.5 用 2.5 上限（30s/30 图/10 视频/10 音频），
- * 2.0 系用 2.0 上限（15s/9 图/3 视频/3 音频）。These are the billing guards —
- * the model cannot inflate the cost tier through omitted or oversized fields.
+ * Validate value constraints the schema DSL does not express: the caps the
+ * provider declares for the model being asked for, and the mutually exclusive
+ * input combinations. The caps are billing guards — the model cannot inflate
+ * the cost tier through an omitted or oversized field.
  */
 function validateVideoArgs(args: {
   prompt: string
@@ -115,7 +95,7 @@ function validateVideoArgs(args: {
   duration?: number
   generateAudio?: boolean
   returnLastFrame?: boolean
-}, model: string | undefined): void {
+}, model: string | undefined, caps: VideoCaps): void {
   if (args.prompt.trim().length === 0) {
     throw new Error('generate_video: prompt must be a non-empty string')
   }
@@ -126,10 +106,9 @@ function validateVideoArgs(args: {
   if (args.imageWithRoles !== undefined && (args.videoUrls !== undefined || args.audioUrls !== undefined)) {
     throw new Error('generate_video: imageWithRoles cannot be combined with videoUrls or audioUrls')
   }
-  const caps = capsForModel(model)
   if (args.duration !== undefined
-    && (!Number.isInteger(args.duration) || args.duration < MIN_DURATION || args.duration > caps.maxDuration)) {
-    throw new Error(`generate_video: duration must be an integer from ${MIN_DURATION} through ${caps.maxDuration}`)
+    && (!Number.isInteger(args.duration) || args.duration < caps.minDuration || args.duration > caps.maxDuration)) {
+    throw new Error(`generate_video: duration must be an integer from ${caps.minDuration} through ${caps.maxDuration}`)
   }
   if (args.imageUrls !== undefined && args.imageUrls.length > caps.maxImageUrls) {
     throw new Error(`generate_video: at most ${caps.maxImageUrls} reference images are allowed (model ${model ?? 'default'})`)
@@ -193,7 +172,7 @@ export function registerGenerateVideo(ctx: Context): () => void {
       const provider = adapter === undefined ? ctx.media.video() : ctx.media.video(adapter)
       // model 必填（schema 强制）：显式模型档位，杜绝静默落到 provider 默认 mini。
       const effectiveModel = args.model
-      validateVideoArgs(args, effectiveModel)
+      validateVideoArgs(args, effectiveModel, provider.caps(effectiveModel))
       const input: VideoGenerateInput = {
         prompt: args.prompt,
         model: args.model,
@@ -264,7 +243,7 @@ export function registerGenerateVideo(ctx: Context): () => void {
                   const workspace = workspaceOf(exec.agent)
                   const reported = (result.providerMeta as { costUsd?: unknown } | undefined)?.costUsd
                   const reportedUsd = typeof reported === 'number' && Number.isFinite(reported) ? reported : undefined
-                  const estimated = estimateVideoCostUsd(
+                  const estimated = provider.estimateCostUsd(
                     result.providerMeta?.model ?? provider.defaultModel,
                     input.duration ?? DEFAULT_DURATION,
                     args.resolution ?? '720p',
