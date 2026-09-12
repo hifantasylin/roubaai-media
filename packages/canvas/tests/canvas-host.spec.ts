@@ -38,7 +38,7 @@ function fakeResponse() {
   return res
 }
 
-async function get(path: string, config = { basePath: '/canvas', canvasRoot: root }): Promise<{ status: number; headers: Record<string, string>; text: string }> {
+async function get(path: string, config = { basePath: '/canvas', canvasRoot: root, openaiBasePath: '/api/roubaai-media/openai' }): Promise<{ status: number; headers: Record<string, string>; text: string }> {
   const res = fakeResponse()
   await handleCanvasRequest(
     { method: 'GET', headers: {}, on: () => undefined } as unknown as IncomingMessage,
@@ -102,14 +102,24 @@ describe('canvas host: serving', () => {
     expect(text).toContain('roubaai-assets')
   })
 
+  it('serves a config.js that points generation at the host, not at a browser key', async () => {
+    const { status, headers, text } = await get('/canvas/config.js')
+    expect(status).toBe(200)
+    expect(headers['content-type']).toBe('text/javascript; charset=utf-8')
+    expect(text).toContain('window.__RUNTIME_CONFIG__')
+    expect(text).toContain('"/api/roubaai-media/openai"')
+    // Nothing here may carry a credential: the key lives in the host's settings.
+    expect(text).not.toMatch(/apiKey|sk-/)
+  })
+
   it('explains how to build the frontend when none is configured', async () => {
-    const { status, text } = await get('/canvas/', { basePath: '/canvas', canvasRoot: '' })
+    const { status, text } = await get('/canvas/', { basePath: '/canvas', canvasRoot: '', openaiBasePath: '/api/roubaai-media/openai' })
     expect(status).toBe(503)
     expect(text).toContain('VITE_BASE=/canvas/')
   })
 
   it('honours a custom mount point', async () => {
-    const { status, text } = await get('/workbench/', { basePath: '/workbench', canvasRoot: root })
+    const { status, text } = await get('/workbench/', { basePath: '/workbench', canvasRoot: root, openaiBasePath: '/api/roubaai-media/openai' })
     expect(status).toBe(200)
     expect(text).toContain('<title>canvas</title>')
   })

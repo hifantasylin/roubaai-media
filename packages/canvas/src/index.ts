@@ -38,6 +38,12 @@ export const inject = ['webServer']
 const DEFAULT_BASE_PATH = '/canvas'
 
 /**
+ * Where the facade listens, as the browser reaches it. The canvas is told this
+ * path instead of being asked for a base URL and a key of its own.
+ */
+const DEFAULT_OPENAI_BASE_PATH = '/api/roubaai-media/openai'
+
+/**
  * The package root, found by walking up to the nearest `package.json`.
  *
  * The same code runs from `src/` under the test runner and from `lib/types/`
@@ -65,6 +71,11 @@ export interface CanvasConfig {
   readonly canvasRoot?: string
   /** Mount point; defaults to `/canvas`. */
   readonly basePath?: string
+  /**
+   * The generation facade's path on this origin, published to the canvas through
+   * `config.js`. Defaults to the media plugin's OpenAI-compatible facade.
+   */
+  readonly openaiBasePath?: string
 }
 
 /** Normalize a mount point into `/<name>` with no trailing slash. */
@@ -142,7 +153,7 @@ export async function handleCanvasRequest(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  config: { basePath: string; canvasRoot: string },
+  config: { basePath: string; canvasRoot: string; openaiBasePath: string },
 ): Promise<void> {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     send(res, 405, 'text/plain; charset=utf-8', 'method not allowed')
@@ -173,6 +184,26 @@ export async function handleCanvasRequest(
     } catch {
       send(res, 404, 'text/plain; charset=utf-8', 'the bundled node plugin is missing from this install')
     }
+    return
+  }
+
+  // The frontend loads `config.js` from its own root, and upstream reads only
+  // analytics ids out of it. Serving our own copy of that file is the injection
+  // point the harness needs: it tells the canvas where generation goes, so the
+  // browser never holds a provider key and the Settings page stays the single
+  // place a backend is configured.
+  if (relative === 'config.js') {
+    const runtime = [
+      '// Served by @roubaai/canvas. Upstream reads analytics ids out of',
+      '// window.__RUNTIME_CONFIG__; the harness also states where generation goes.',
+      'window.__RUNTIME_CONFIG__ = window.__RUNTIME_CONFIG__ || {};',
+      'window.__ROUBA_HOST__ = {',
+      `  openaiBasePath: ${JSON.stringify(config.openaiBasePath)},`,
+      '  label: "DSH 设置",',
+      '};',
+      '',
+    ].join('\n')
+    send(res, 200, 'text/javascript; charset=utf-8', runtime)
     return
   }
 
@@ -208,6 +239,7 @@ export async function handleCanvasRequest(
 export function apply(ctx: Context, config: CanvasConfig = {}): void {
   const basePath = normalizeBasePath(config.basePath)
   const canvasRoot = resolve(config.canvasRoot ?? '')
+  const openaiBasePath = config.openaiBasePath ?? DEFAULT_OPENAI_BASE_PATH
   if (canvasRoot === '') {
     ctx.logger.warn(`roubaai-canvas: canvasRoot is unset; ${basePath}/ will explain how to build the frontend`)
   }
@@ -215,7 +247,11 @@ export function apply(ctx: Context, config: CanvasConfig = {}): void {
     kind: 'prefix',
     path: basePath,
     handler: (req, res): void => {
-      void handleCanvasRequest(req, res, new URL(req.url ?? basePath, 'http://dsh.internal'), { basePath, canvasRoot })
+      void handleCanvasRequest(req, res, new URL(req.url ?? basePath, 'http://dsh.internal'), {
+        basePath,
+        canvasRoot,
+        openaiBasePath,
+      })
     },
   }), 'roubaai-canvas: canvas app routes')
 }
