@@ -1,0 +1,11 @@
+{
+  // @roubaai/brand is browser presentation only: one JSX occupant set plus an
+  // empty node-half Loader seat. JSX and the DOM library come from
+  // tsconfig.base.client.json; nothing here reads a Node global.
+  "extends": "../../tsconfig.base.client.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types"
+  },
+  "include": ["src"]
+}

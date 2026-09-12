@@ -1,6 +1,6 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
-#   pnpm run verify-translation-pairing --write packages/roubaai-video-plugin/README.md
-README.md: ced940f8139239f323015de01a51f7a4cca0a08d
-README.zh.md: 8a2f94dd8902855da222d14973d82996ee755e19
+# Bilingual-pair consistency record: the git blob hash of each side of the
+# repository README as of the last confirmed-consistent state. Both languages
+# carry equal authority; after editing either side, bring the other along and
+# re-record its hash with `git hash-object <file>`.
+README.md: 041fb22f8b8269bc51f21abec9da1fa3e058659a
+README.zh.md: 6f299ce389704c65213b973aaa362a64db0197cc
