@@ -266,7 +266,10 @@ describe('generate_video tool', () => {
     expect(schema).toBeDefined()
     const properties = (schema!.parameters as { properties: Record<string, unknown> }).properties
     expect(properties.prompt).toMatchObject({ type: 'string' })
-    expect(properties.model).toMatchObject({ enum: ['doubao-seedance-2.0-mini', 'doubao-seedance-2.0-fast', 'doubao-seedance-2.0', 'doubao-seedance-2.5'] })
+    // The accepted model ids depend on which adapter the deployment mounted,
+    // so the schema states the type only and the adapter validates the id.
+    expect(properties.model).toMatchObject({ type: 'string' })
+    expect(properties.model).not.toHaveProperty('enum')
     expect(properties.duration).toMatchObject({ type: 'integer' })
     expect(properties.resolution).toMatchObject({ enum: ['480p', '720p', '1080p'] })
     expect(properties.size).toMatchObject({ enum: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9', 'adaptive'] })
