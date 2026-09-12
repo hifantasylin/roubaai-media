@@ -278,3 +278,124 @@ describe('ArkVideoProvider finalize', () => {
     await expect(provider(ctx).finalize(handle)).rejects.toThrow(/unreachable/)
   })
 })
+
+describe('ArkVideoProvider model catalogue', () => {
+  it('keeps only the entries Ark labels as video models', async () => {
+    const calls = stubFetch([() => fakeResponse(200, {
+      object: 'list',
+      data: [
+        { id: 'doubao-seedance-2-0-mini-260615', task_type: ['VideoGeneration'], status: 'available' },
+        { id: 'doubao-seedance-2-0-260128', task_type: 'VideoGeneration' },
+        { id: 'doubao-seedream-5-0-pro-260628', task_type: ['ImageGeneration'], status: 'available' },
+        { id: 'doubao-unlabelled-1', object: 'model' },
+      ],
+    })])
+
+    const models = await provider(contextWithKey()).listModels()
+
+    expect(calls[0]!.url).toBe('https://ark.example/api/v3/models')
+    expect(calls[0]!.authorization).toBe('Bearer ark-key')
+    expect(models).toEqual([
+      { id: 'doubao-seedance-2-0-mini-260615', status: 'available', taskTypes: ['VideoGeneration'] },
+      { id: 'doubao-seedance-2-0-260128', taskTypes: ['VideoGeneration'] },
+    ])
+  })
+
+  it('reads the catalogue with the endpoint and key a form holds', async () => {
+    const calls = stubFetch([() => fakeResponse(200, { data: [] })])
+    await provider(contextWithKey()).listModelsWithDraft({
+      baseUrl: 'https://ark-draft.example/api/v3/',
+      apiKey: 'draft-key',
+    })
+
+    expect(calls[0]!.url).toBe('https://ark-draft.example/api/v3/models')
+    expect(calls[0]!.authorization).toBe('Bearer draft-key')
+  })
+
+  it('raises a non-200 instead of reporting an empty catalogue', async () => {
+    stubFetch([() => fakeResponse(403, { error: { message: 'denied' } })])
+    await expect(provider(contextWithKey()).listModels()).rejects.toThrow(/\[403\]/)
+  })
+})
+
+describe('ArkVideoProvider model-not-found recovery', () => {
+  it('appends the available model ids to a refused retired model', async () => {
+    stubFetch([
+      () => fakeResponse(404, {
+        error: { code: 'InvalidEndpointOrModel.NotFound', message: 'The model or endpoint does not exist' },
+      }),
+      () => fakeResponse(200, {
+        data: [
+          { id: 'doubao-seedance-2-0-mini-260615', task_type: ['VideoGeneration'] },
+          { id: 'doubao-seedance-2-0-260128', task_type: ['VideoGeneration'] },
+          { id: 'doubao-seedream-5-0-pro-260628', task_type: ['ImageGeneration'] },
+        ],
+      }),
+    ])
+
+    const error = await provider(contextWithKey())
+      .submit({ prompt: 'x', model: 'doubao-seedance-1-5-pro-251215' })
+      .catch((caught: unknown) => caught)
+    const message = (error as Error).message
+    // The old message said "任务不存在" and nothing else, which sent the caller
+    // looking for a task that was never created.
+    expect(message).toContain('InvalidEndpointOrModel.NotFound')
+    expect(message).toContain('The model or endpoint does not exist')
+    expect(message).toContain('可用模型：doubao-seedance-2-0-mini-260615、doubao-seedance-2-0-260128')
+    expect(message).not.toContain('doubao-seedream-5-0-pro-260628')
+  })
+
+  it('keeps Ark\u2019s own message when the catalogue cannot be read either', async () => {
+    stubFetch([
+      () => fakeResponse(404, { error: { code: 'InvalidEndpointOrModel.NotFound', message: 'model retired' } }),
+      () => fakeResponse(500, {}),
+    ])
+
+    const error = await provider(contextWithKey()).submit({ prompt: 'x', model: 'gone' }).catch((caught: unknown) => caught)
+    expect((error as Error).message).toContain('model retired')
+    expect((error as Error).message).toContain('可用模型列表获取失败')
+  })
+
+  it('reports a plain status refusal without asking for the catalogue', async () => {
+    const calls = stubFetch([() => fakeResponse(401, { error: { message: 'bad key' } })])
+    const error = await provider(contextWithKey()).submit({ prompt: 'x', model: 'm' }).catch((caught: unknown) => caught)
+    expect((error as Error).message).toContain('bad key')
+    expect((error as Error).message).toContain('API Key')
+    expect(calls).toHaveLength(1)
+  })
+})
+
+describe('ArkVideoProvider probe', () => {
+  it('reports a row with no key anywhere as unconfigured, without probing', async () => {
+    const calls = stubFetch([() => fakeResponse(404, {})])
+    // No credential seeded and an empty draft: nothing exists to probe with.
+    const result = await provider(new Context()).probe({ baseUrl: 'https://ark.example/api/v3', apiKey: ' ' })
+    expect(result.status).toBe('unconfigured')
+    expect(result.message).toContain('ARK_API_KEY')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('reports a refused key as failed', async () => {
+    stubFetch([() => fakeResponse(401, { error: { message: 'invalid key' } })])
+    const result = await provider(contextWithKey()).probe({ baseUrl: 'https://ark.example/api/v3', apiKey: 'k' })
+    expect(result.status).toBe('failed')
+    expect(result.message).toContain('401')
+  })
+
+  it('accepts a 404 task lookup as proof of a working key', async () => {
+    const calls = stubFetch([() => fakeResponse(404, { error: { message: 'task not found' } })])
+    const result = await provider(contextWithKey()).probe({ baseUrl: 'https://ark.example/api/v3', apiKey: 'k' })
+    expect(result.status).toBe('ok')
+    expect(calls[0]!.url).toContain('/contents/generations/tasks/connection-probe')
+  })
+
+  it('probes with the saved key when the form holds none', async () => {
+    const calls = stubFetch([() => fakeResponse(404, {})])
+    const result = await provider(contextWithKey('sk-test-saved')).probe({
+      baseUrl: 'https://ark.example/api/v3',
+      apiKey: '',
+    })
+    expect(result.status).toBe('ok')
+    expect(calls[0]!.authorization).toBe('Bearer sk-test-saved')
+  })
+})

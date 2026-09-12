@@ -411,3 +411,45 @@ describe('MaiziVideoProvider', () => {
     expect(body.video_urls).toHaveLength(10)
   })
 })
+
+describe('Maizi probe states', () => {
+  const draft = { baseUrl: 'https://maizi.example/v1' }
+
+  it('reports unconfigured — and sends nothing — when no key exists anywhere', async () => {
+    const { ctx } = boot()
+    const fetchMock = vi.fn(async () => fakeResponse(200, {}))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const image = await new MaiziImageProvider(ctx).probe({ ...draft, apiKey: '' })
+    const video = await new MaiziVideoProvider(ctx).probe({ ...draft, apiKey: '  ' })
+
+    expect(image.status).toBe('unconfigured')
+    expect(image.message).toContain('MAIZI_API_KEY')
+    expect(video.status).toBe('unconfigured')
+    // Nothing was probed, so nothing can fail: an empty row is a to-do, not a red error.
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('reports failed when a key exists and is refused', async () => {
+    const { ctx } = boot()
+    vi.stubGlobal('fetch', vi.fn(async () => fakeResponse(401, { error: 'bad key' })))
+    const result = await new MaiziImageProvider(ctx).probe({ ...draft, apiKey: 'sk-test-bad' })
+
+    expect(result.status).toBe('failed')
+    expect(result.message).toContain('401')
+  })
+
+  it('reports ok on a reachable endpoint', async () => {
+    const { ctx } = boot()
+    vi.stubGlobal('fetch', vi.fn(async () => fakeResponse(404, { error: 'no such task' })))
+    await expect(new MaiziImageProvider(ctx).probe({ ...draft, apiKey: 'sk-test-ok' }))
+      .resolves.toEqual({ status: 'ok', message: '连接成功（HTTP 404）' })
+  })
+
+  it('probes with a saved key when the form holds none', async () => {
+    const { ctx } = boot({ MAIZI_API_KEY: 'sk-test-saved' })
+    vi.stubGlobal('fetch', vi.fn(async () => fakeResponse(404, {})))
+    await expect(new MaiziImageProvider(ctx).probe({ ...draft, apiKey: '' }))
+      .resolves.toEqual({ status: 'ok', message: '连接成功（HTTP 404）' })
+  })
+})

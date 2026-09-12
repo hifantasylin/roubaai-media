@@ -37,6 +37,7 @@ const MediaProviderEntrySchema: z<MediaProviderEntry> = z.object({
   adapter: z.string().default(UNSET),
   baseUrl: z.string().default(UNSET),
   model: z.string().default(UNSET),
+  resolution: z.string().default(UNSET),
 })
 
 /** Schema for one category: its provider list plus the provider in use. */

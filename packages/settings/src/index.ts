@@ -35,8 +35,9 @@ import {
   ROUBAAI_SETTINGS_NS,
   RoubaaiMediaSettingsSchema,
   type MediaCategory,
+  type TestResult,
 } from './config.ts'
-import { adapterCatalog, probeViaAdapter } from './adapters.ts'
+import { adapterCatalog, modelsViaAdapter, probeViaAdapter } from './adapters.ts'
 
 /**
  * Stable Cordis plugin name. Intentionally NOT the settings namespace: the
@@ -136,30 +137,35 @@ async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknow
  * looking at (an unsaved key included), so a key can be verified in the same
  * breath it is typed.
  *
+ * This is the fallback used when the row's own adapter cannot answer (not
+ * mounted, or no probe of its own), so it only knows the two key sources the
+ * route can see: the form's draft and the stored document. It therefore never
+ * reports `unconfigured` for a key that exists only in the environment — that
+ * judgement belongs to the provider, which knows its own credential reference.
+ *
  * @param baseUrl - the endpoint base to probe.
- * @param apiKey - the key to present.
- * @returns whether the endpoint answered favorably, plus the human reason.
+ * @param apiKey - the key to present (the form's, else the stored one).
+ * @returns the three-state outcome, with the endpoint's own answer.
  */
-export async function testConnection(
-  baseUrl: string,
-  apiKey: string,
-): Promise<{ ok: boolean; message: string }> {
-  if (apiKey.trim() === '') return { ok: false, message: '未填写 API Key' }
+export async function testConnection(baseUrl: string, apiKey: string): Promise<TestResult> {
+  if (apiKey.trim() === '') {
+    return { status: 'unconfigured', message: '表单未填写，设置中也未保存该行的 API Key' }
+  }
   const base = baseUrl.trim().replace(/\/+$/, '')
-  if (base === '') return { ok: false, message: '未填写接口地址' }
+  if (base === '') return { status: 'failed', message: '表单未填写接口地址，且该行没有可用的默认端点' }
   try {
     const response = await fetch(`${base}/models`, {
       method: 'GET',
       headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' },
       signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
     })
-    if (response.ok) return { ok: true, message: `连接成功（HTTP ${String(response.status)}）` }
-    return { ok: false, message: response.status === 401 || response.status === 403
+    if (response.ok) return { status: 'ok', message: `连接成功（HTTP ${String(response.status)}）` }
+    return { status: 'failed', message: response.status === 401 || response.status === 403
       ? `API Key 被拒绝（HTTP ${String(response.status)}）`
       : `端点返回 HTTP ${String(response.status)}` }
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
-    return { ok: false, message: `无法连接端点：${reason}` }
+    return { status: 'failed', message: `无法连接端点：${reason}` }
   }
 }
 
@@ -172,6 +178,18 @@ interface LegacyFlatSettings {
   musicApiKey?: unknown
   musicModel?: unknown
 }
+
+/**
+ * Registry name a migrated legacy row keeps. The pre-3-category document held
+ * ONE shared key and endpoint plus per-kind model overrides, and those were
+ * MaiziAI's (music's separate key was MxAPI's). The row therefore stays on
+ * `maizi` rather than moving to whatever the category's default adapter has
+ * become: its stored credential and endpoint are Maizi's, and pointing that row
+ * at another backend would send a Maizi key to a host that never issued it. A
+ * deployment that wants a different backend switches the row on the Settings
+ * page, which is where that choice belongs.
+ */
+const LEGACY_IMAGE_VIDEO_ADAPTER = 'maizi'
 
 /**
  * One-time migration: fold the legacy flat shape into the per-category
@@ -203,14 +221,14 @@ async function migrateLegacySettings(ctx: Context): Promise<void> {
       activeId: DEFAULT_PROVIDER_ID,
       providers: [{
         id: `${DEFAULT_PROVIDER_ID}:image`, name: '', custom: false,
-        adapter: MEDIA_CATEGORY_DEFAULT_ADAPTERS.image, baseUrl, model: string('imageModel'),
+        adapter: LEGACY_IMAGE_VIDEO_ADAPTER, baseUrl, model: string('imageModel'),
       }],
     },
     video: {
       activeId: DEFAULT_PROVIDER_ID,
       providers: [{
         id: `${DEFAULT_PROVIDER_ID}:video`, name: '', custom: false,
-        adapter: MEDIA_CATEGORY_DEFAULT_ADAPTERS.video, baseUrl, model: string('videoModel'),
+        adapter: LEGACY_IMAGE_VIDEO_ADAPTER, baseUrl, model: string('videoModel'),
       }],
     },
     music: {
@@ -233,53 +251,95 @@ async function migrateLegacySettings(ctx: Context): Promise<void> {
  * (an unauthorized key is refused before the id is ever read).
  *
  * @param baseUrl - the music endpoint base (…/api/v2/music).
- * @param apiKey - the key to present.
- * @returns whether the endpoint answered favorably, plus the human reason.
+ * @param apiKey - the key to present (the form's, else the stored one).
+ * @returns the three-state outcome, with MxAPI's own answer.
  */
-export async function testMusicConnection(
-  baseUrl: string,
-  apiKey: string,
-): Promise<{ ok: boolean; message: string }> {
-  if (apiKey.trim() === '') return { ok: false, message: '未填写 API Key' }
+export async function testMusicConnection(baseUrl: string, apiKey: string): Promise<TestResult> {
+  if (apiKey.trim() === '') {
+    return { status: 'unconfigured', message: '表单未填写，设置中也未保存该行的 API Key' }
+  }
   const base = baseUrl.trim().replace(/\/+$/, '')
-  if (base === '') return { ok: false, message: '未填写接口地址' }
+  if (base === '') return { status: 'failed', message: '表单未填写接口地址，且该行没有可用的默认端点' }
   try {
     const response = await fetch(`${base}/task?id=connection-probe`, {
       method: 'GET',
       headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' },
       signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
     })
-    if (response.ok) return { ok: true, message: `连接成功（HTTP ${String(response.status)}）` }
+    const body = await response.json().catch(() => undefined) as { code?: unknown; message?: unknown } | undefined
+    const apiMessage = typeof body?.message === 'string' && body.message.length > 0 ? body.message : undefined
+    if (response.ok) return { status: 'ok', message: `连接成功（HTTP ${String(response.status)}）` }
     // The API answers an unknown id with HTTP 404 carrying a business JSON
     // body ("任务不存在") — that is the expected no-such-task answer, and it
     // proves both reachability and acceptance (an unauthorized key is
     // refused by the auth middleware before the id is read). A plain 404
     // without that JSON shape is a genuine missing route.
-    if (response.status === 404) {
-      const body = await response.json().catch(() => undefined) as { code?: unknown; message?: unknown } | undefined
-      if (typeof body === 'object' && body !== null && body['code'] !== undefined) {
-        return { ok: true, message: `连接成功（HTTP 404，${String(body['message'] ?? '任务不存在')}）` }
-      }
+    if (response.status === 404 && typeof body?.code !== 'undefined') {
+      return { status: 'ok', message: `连接成功（HTTP 404，${apiMessage ?? '任务不存在'}）` }
     }
-    return { ok: false, message: response.status === 401 || response.status === 403
-      ? `API Key 被拒绝（HTTP ${String(response.status)}）`
-      : `端点返回 HTTP ${String(response.status)}` }
+    const detail = apiMessage === undefined ? '' : `：${apiMessage}`
+    return { status: 'failed', message: response.status === 401 || response.status === 403
+      ? `API Key 被拒绝（HTTP ${String(response.status)}）${detail}`
+      : `端点返回 HTTP ${String(response.status)}${detail}` }
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
-    return { ok: false, message: `无法连接端点：${reason}` }
+    return { status: 'failed', message: `无法连接端点：${reason}` }
   }
+}
+
+/**
+ * The API key stored for one category, or `''`. The route is the settings
+ * owner, so it can answer this from its own document: the row `activeId` names,
+ * else the category's first row — the same resolution the providers apply (the
+ * schema defaults `activeId` to `default` while a built-in row's id is
+ * `default:<category>`).
+ *
+ * It exists so the generic probe can still run against a key that is already
+ * saved when the row's adapter cannot answer for itself. It is a read: nothing
+ * here — and nothing in this package — ever writes a key.
+ * @param ctx - the plugin context carrying the settings service.
+ * @param category - which category's row to read.
+ * @returns the stored key, or `''` when none is stored.
+ */
+function storedKey(ctx: Context, category: MediaCategory): string {
+  let value: unknown
+  try {
+    value = ctx.settings.describe().find((descriptor) => descriptor.ns === ROUBAAI_SETTINGS_NS)?.value
+  } catch {
+    return ''
+  }
+  if (typeof value !== 'object' || value === null) return ''
+  const record = value as Record<string, unknown>
+  const keys = typeof record['keys'] === 'object' && record['keys'] !== null
+    ? record['keys'] as Record<string, unknown>
+    : {}
+  const categoryValue = typeof record[category] === 'object' && record[category] !== null
+    ? record[category] as Record<string, unknown>
+    : undefined
+  const raw = Array.isArray(categoryValue?.['providers']) ? categoryValue['providers'] : []
+  const rows = raw.filter((candidate): candidate is Record<string, unknown> =>
+    typeof candidate === 'object' && candidate !== null
+    && typeof (candidate as Record<string, unknown>)['id'] === 'string'
+    && ((candidate as Record<string, unknown>)['id'] as string).length > 0)
+  const activeId = typeof categoryValue?.['activeId'] === 'string' ? categoryValue['activeId'] as string : ''
+  const row = rows.find((candidate) => candidate['id'] === activeId) ?? rows[0]
+  if (row === undefined) return ''
+  const key = keys[row['id'] as string]
+  return typeof key === 'string' ? key : ''
 }
 
 /**
  * Register the provider-configuration namespace and mount its fenced JSON
  * route.
  *
- * Three methods share the prefix: `settings.get` (redacted view, revision, and
+ * Four methods share the prefix: `settings.get` (redacted view, revision, and
  * the adapter catalog the deployment mounted), `settings.update`
- * (revision-guarded deep-merge patch), and `test` (a probe against the values
+ * (revision-guarded deep-merge patch), `test` (a probe against the values
  * the caller is looking at, an unsaved key included — run by the row's adapter
- * when it implements one, else by the generic endpoint probe). The legacy
- * migration runs once before the route mounts.
+ * when it implements one, else by the generic endpoint probe), and
+ * `models.list` (the row's backend model catalogue, again against the form's
+ * unsaved draft; empty with a reason when that backend cannot list models). The
+ * legacy migration runs once before the route mounts.
  * @param ctx - plugin context carrying the webServer and settings services.
  */
 export function apply(ctx: Context): void {
@@ -338,7 +398,34 @@ export function apply(ctx: Context): void {
         ...model === undefined ? {} : { model },
       })
       if (own !== undefined) return own
-      return category === 'music' ? testMusicConnection(baseUrl, apiKey) : testConnection(baseUrl, apiKey)
+      // The generic probe below runs only when the row's adapter cannot answer
+      // (unmounted, or no probe of its own). It falls back to the stored key so
+      // "already saved, just testing" reads as a real probe rather than as an
+      // unconfigured row; whether the *environment* supplies one is a question
+      // only the provider can answer, since the credential reference is its own
+      // configuration.
+      const effectiveKey = apiKey.trim() !== '' ? apiKey : storedKey(ctx, category)
+      return category === 'music'
+        ? testMusicConnection(baseUrl, effectiveKey)
+        : testConnection(baseUrl, effectiveKey)
+    },
+    'models.list': async (payload) => {
+      // The form asks for one row's catalogue while that row is being edited, so
+      // the category and the row's adapter come from the request. A row stored
+      // before adapters existed carries none; it resolves to the category
+      // default, which is the backend such a row actually runs on.
+      const kind = payload['category']
+      const category: MediaCategory = kind === 'image' || kind === 'music' ? kind : 'video'
+      const named = typeof payload['adapter'] === 'string' ? payload['adapter'] : ''
+      const adapter = named !== '' ? named : MEDIA_CATEGORY_DEFAULT_ADAPTERS[category]
+      // The draft's endpoint and key are what the form is looking at right now,
+      // an unsaved key included: browsing the catalogue must not require saving
+      // the key first. An empty field means "use the configured value".
+      const raw = payload['draft']
+      const draft = typeof raw === 'object' && raw !== null ? raw as Record<string, unknown> : {}
+      const baseUrl = typeof draft['baseUrl'] === 'string' ? draft['baseUrl'] : ''
+      const apiKey = typeof draft['apiKey'] === 'string' ? draft['apiKey'] : ''
+      return await modelsViaAdapter(ctx, category, adapter, { baseUrl, apiKey })
     },
   }
 

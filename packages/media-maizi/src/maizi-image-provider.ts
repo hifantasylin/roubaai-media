@@ -10,12 +10,12 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { ImageProvider, readActiveMediaProvider } from '@roubaai/media'
 import type {
   ImageCaps, ImageGenerationResult, ImageGenerateInput, MediaProgress, ProviderProbeDraft, ProviderProbeResult,
 } from '@roubaai/media'
 import { getJson, postJson, downloadBytes, MaiziHttpError } from './http.ts'
+import { maiziUnconfiguredReason, resolveMaiziKey } from './credentials.ts'
 import { DEFAULT_SETTINGS_NAMESPACE } from './settings-config.ts'
 
 /**
@@ -204,17 +204,23 @@ export class MaiziImageProvider extends ImageProvider {
    * the environment. The credential store — and through it `MAIZI_API_KEY` —
    * stays the fallback, so a deployment that never opens the Settings page is
    * unaffected.
-   * @throws {MissingCredentialError} when neither source holds a key.
+   * @throws {MissingCredentialError} when no source holds a key.
    */
   private async resolveKey(): Promise<string> {
-    const configured = readActiveMediaProvider(this.ctx, this.settingsNamespace, 'image').apiKey
-    if (configured !== undefined) return configured
-    const credentials = this.ctx.get('credentials')
-    if (credentials !== undefined) {
-      const hit = await credentials.resolve(credentialRef(this.apiKeyEnv))
-      if (hit !== undefined && hit.value.length > 0) return hit.value
-    }
-    throw new MissingCredentialError(this.apiKeyEnv)
+    const key = await this.probeKey('')
+    if (key === undefined) throw new MissingCredentialError(this.apiKeyEnv)
+    return key
+  }
+
+  /**
+   * The key a probe should present, or `undefined` when this deployment has
+   * none anywhere. `undefined` is not an error here: it is the whole difference
+   * between "nothing is configured yet" and "the backend refused what we sent".
+   * @param draftKey - a key the configuration form holds but has not saved.
+   * @returns the key to present, or `undefined` when nothing is configured.
+   */
+  private async probeKey(draftKey: string): Promise<string | undefined> {
+    return await resolveMaiziKey(this.ctx, this.settingsNamespace, 'image', this.apiKeyEnv, draftKey)
   }
 
   /**
@@ -229,9 +235,8 @@ export class MaiziImageProvider extends ImageProvider {
 
   /**
    * Default image model: the Settings page's active-provider override when one
-   * is stored, else the deployment-configured model. `ImageGenerateInput`
-   * carries no model field, so this value is the only thing that decides which
-   * model runs — which is exactly why it has to be re-read per operation.
+   * is stored, else the deployment-configured model. It is the fallback for a
+   * request that names no model; an explicit `input.model` wins over it.
    */
   private resolveModel(): string {
     return readActiveMediaProvider(this.ctx, this.settingsNamespace, 'image').model ?? this.defaultModel
@@ -244,8 +249,11 @@ export class MaiziImageProvider extends ImageProvider {
   ): Promise<ImageGenerationResult> {
     const apiKey = await this.resolveKey()
     // Resolved once per generation so the request, the landed attachment name,
-    // and the reported `providerMeta` can never disagree about the model.
-    const model = this.resolveModel()
+    // and the reported `providerMeta` can never disagree about the model. An
+    // explicit override wins; this backend declares no per-model capability, so
+    // the `generate_image` tool never supplies one and the configured model
+    // decides in practice.
+    const model = input.model ?? this.resolveModel()
     const payload: Record<string, unknown> = {
       model,
       prompt: input.prompt,
@@ -451,24 +459,33 @@ export class MaiziImageProvider extends ImageProvider {
    * Probe the endpoint and key the configuration form holds. A read-only task
    * lookup: an unknown id answers a business 404, which proves reachability and
    * key acceptance without submitting a billable generation.
+   *
+   * A row with no key anywhere is reported as `unconfigured` rather than as a
+   * failure: nothing was probed, and painting that red hides the difference
+   * between "fill this in" and "what you filled in is wrong".
    */
   async probe(draft: ProviderProbeDraft): Promise<ProviderProbeResult> {
-    if (draft.apiKey.trim() === '') return { ok: false, message: '未填写 API Key' }
-    const base = draft.baseUrl.trim().replace(/\/+$/, '')
-    if (base === '') return { ok: false, message: '未填写接口地址' }
+    const base = draft.baseUrl.trim() === ''
+      ? this.resolveBaseUrl()
+      : draft.baseUrl.trim().replace(/\/+$/, '')
+    if (base === '') return { status: 'failed', message: '表单未填写接口地址，且该后端也未配置默认端点' }
+    const apiKey = await this.probeKey(draft.apiKey)
+    if (apiKey === undefined) {
+      return { status: 'unconfigured', message: maiziUnconfiguredReason(this.apiKeyEnv) }
+    }
     try {
-      const { status } = await getJson(`${base}/tasks/nonexistent-probe-connection`, draft.apiKey)
+      const { status } = await getJson(`${base}/tasks/nonexistent-probe-connection`, apiKey)
       if (status < 500 && status !== 401 && status !== 403) {
-        return { ok: true, message: `连接成功（HTTP ${status}）` }
+        return { status: 'ok', message: `连接成功（HTTP ${status}）` }
       }
       return {
-        ok: false,
+        status: 'failed',
         message: status === 401 || status === 403
           ? `API Key 被拒绝（HTTP ${status}）`
           : `端点返回 HTTP ${status}`,
       }
     } catch (error) {
-      return { ok: false, message: `无法连接端点：${error instanceof Error ? error.message : String(error)}` }
+      return { status: 'failed', message: `无法连接端点：${error instanceof Error ? error.message : String(error)}` }
     }
   }
 

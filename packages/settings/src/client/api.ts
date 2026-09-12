@@ -7,7 +7,7 @@
  * @module @roubaai/settings/client/api
  */
 
-import type { MediaCategory, SettingsView, TestResult } from '../shared.ts'
+import type { MediaCategory, ModelsListResult, SettingsView, TestResult } from '../shared.ts'
 
 /** The host route prefix (kept in sync with the host half's `API_PREFIX`). */
 export const API_PREFIX = '/api/roubaai-video'
@@ -86,5 +86,23 @@ export const api = {
       kind: draft.category,
       ...draft.adapter === undefined || draft.adapter === '' ? {} : { adapter: draft.adapter },
       ...draft.model === undefined || draft.model === '' ? {} : { model: draft.model },
+    }),
+  /**
+   * Read one row's backend model catalogue — the values the card shows, an
+   * unsaved key included. Nothing is persisted by this call, and a backend that
+   * cannot list models answers an empty list with an explanation rather than an
+   * error, so the form can keep its free-text input.
+   * @param query - the row's category, adapter, and the endpoint/key draft.
+   * @returns the catalogue plus any note about why it is empty.
+   */
+  modelsList: (query: {
+    category: MediaCategory
+    adapter?: string
+    draft?: { baseUrl?: string; apiKey?: string }
+  }): Promise<ModelsListResult> =>
+    call<ModelsListResult>('models.list', {
+      category: query.category,
+      ...query.adapter === undefined || query.adapter === '' ? {} : { adapter: query.adapter },
+      ...query.draft === undefined ? {} : { draft: query.draft },
     }),
 }

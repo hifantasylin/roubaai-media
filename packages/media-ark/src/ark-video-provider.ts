@@ -17,14 +17,21 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { VideoProvider, readActiveMediaProvider } from '@roubaai/media'
 import type {
-  MediaProgress, MediaRef, ProviderProbeDraft, ProviderProbeResult, VideoCaps, VideoGenerationResult,
+  MediaModelInfo, MediaProgress, MediaRef, ProviderProbeDraft, ProviderProbeResult, VideoCaps, VideoGenerationResult,
   VideoGenerateInput, VideoTaskHandle, VideoTaskPoll,
 } from '@roubaai/media'
-import { getJson, postJson, probeResult, ArkHttpError, ArkNetworkError, arkStatusMeaning, isNetworkError } from './http.ts'
+import {
+  arkErrorDetail, arkStatusMeaning, ArkHttpError, ArkNetworkError, getJson, isModelNotFound, isNetworkError,
+  postJson, probeResult,
+} from './http.ts'
+import { fetchArkModels, formatModelIds } from './ark-models.ts'
+import { arkUnconfiguredReason, resolveArkKey } from './credentials.ts'
+import { MissingCredentialError } from './errors.ts'
 import { DEFAULT_SETTINGS_NAMESPACE } from './settings-config.ts'
+
+export { MissingCredentialError } from './errors.ts'
 
 /** Ark's public API base (cn-beijing region). */
 export const ARK_VIDEO_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3'
@@ -34,9 +41,10 @@ export const ARK_API_KEY_REF = 'ARK_API_KEY'
 
 /**
  * Fallback model. Callers name a model on every request, so this only backs
- * `caps()` and the connectivity probe; it is Ark's Seedance 1.5 pro id.
+ * `caps()` and the connectivity probe; it is Ark's Seedance 2.0 mini id — the
+ * 1.5 pro id this used to carry is listed as Retiring by the vendor catalogue.
  */
-export const DEFAULT_VIDEO_MODEL = 'doubao-seedance-1-5-pro-251215'
+export const DEFAULT_VIDEO_MODEL = 'doubao-seedance-2-0-mini-260615'
 
 /**
  * Conservative result-URL lifetime. Ark states no expiry for the produced file,
@@ -49,7 +57,7 @@ const VIDEO_PROBE_TIMEOUT_MS = 30_000
 
 /**
  * Per-generation bounds. Ark's model ids embed the generation
- * (`doubao-seedance-1-5-pro-251215`), so the match is on that fragment; an id
+ * (`doubao-seedance-2-0-mini-260615`), so the match is on that fragment; an id
  * matching none takes the most conservative set, which rejects an oversized
  * request before it is billed.
  */
@@ -89,15 +97,6 @@ interface ArkTask {
 /** The task-creation response: Ark answers the new task's id. */
 interface ArkSubmitResponse {
   id?: string
-}
-
-/** Raised when neither the Settings page nor the credential store holds a key. */
-export class MissingCredentialError extends Error {
-  readonly code = 'MISSING_CREDENTIAL'
-  constructor(reference: string) {
-    super(`media-ark: no API key configured — set one on the RoubaAI settings page or provide ${reference}`)
-    this.name = 'MissingCredentialError'
-  }
 }
 
 /** Provider config; every field is optional with a sensible default. */
@@ -297,17 +296,23 @@ export class ArkVideoProvider extends VideoProvider {
    * credential store — and through it `ARK_API_KEY` — stays the fallback, so a
    * deployment that never opens the Settings page is unaffected.
    * @returns the resolved key.
-   * @throws {MissingCredentialError} when neither source holds a key.
+   * @throws {MissingCredentialError} when no source holds a key.
    */
   private async resolveKey(): Promise<string> {
-    const configured = readActiveMediaProvider(this.ctx, this.settingsNamespace, 'video').apiKey
-    if (configured !== undefined) return configured
-    const credentials = this.ctx.get('credentials')
-    if (credentials !== undefined) {
-      const hit = await credentials.resolve(credentialRef(this.apiKeyEnv))
-      if (hit !== undefined && hit.value.length > 0) return hit.value
-    }
-    throw new MissingCredentialError(this.apiKeyEnv)
+    const key = await this.probeKey('')
+    if (key === undefined) throw new MissingCredentialError(this.apiKeyEnv)
+    return key
+  }
+
+  /**
+   * The key a probe should present, or `undefined` when this deployment has
+   * none anywhere. `undefined` is not an error here: it is the whole difference
+   * between "nothing is configured yet" and "the backend refused what we sent".
+   * @param draftKey - a key the configuration form holds but has not saved.
+   * @returns the key to present, or `undefined` when nothing is configured.
+   */
+  private async probeKey(draftKey: string): Promise<string | undefined> {
+    return await resolveArkKey(this.ctx, this.settingsNamespace, 'video', this.apiKeyEnv, draftKey)
   }
 
   /**
@@ -330,6 +335,36 @@ export class ArkVideoProvider extends VideoProvider {
 
   caps(model?: string): VideoCaps {
     return capsForModel(model ?? this.resolveModel())
+  }
+
+  /**
+   * List the video models this deployment may request. Ark reports each model's
+   * capability as `task_type`, which is what separates a video id from an image
+   * one in a catalogue that carries both.
+   * @param signal - cancellation forwarded to the model-list request.
+   * @returns the video models Ark reports, in Ark's order.
+   * @throws {ArkHttpError} when Ark answers a non-200.
+   */
+  override async listModels(signal?: AbortSignal): Promise<MediaModelInfo[]> {
+    const apiKey = await this.resolveKey()
+    return await fetchArkModels(this.resolveBaseUrl(), apiKey, { taskType: 'Video' }, signal)
+  }
+
+  /**
+   * List the video models for the endpoint and key a configuration form holds,
+   * so a key that has not been saved yet can still browse the catalogue. An
+   * empty draft field falls back to the configured value, exactly as
+   * {@link probe} does.
+   * @param draft - the endpoint and key the form holds.
+   * @param signal - cancellation forwarded to the model-list request.
+   * @returns the video models Ark reports, in Ark's order.
+   */
+  override async listModelsWithDraft(draft: ProviderProbeDraft, signal?: AbortSignal): Promise<MediaModelInfo[]> {
+    const base = draft.baseUrl.trim() === ''
+      ? this.resolveBaseUrl()
+      : draft.baseUrl.trim().replace(/\/+$/, '')
+    const apiKey = draft.apiKey.trim() === '' ? await this.resolveKey() : draft.apiKey.trim()
+    return await fetchArkModels(base, apiKey, { taskType: 'Video' }, signal)
   }
 
   /**
@@ -380,7 +415,7 @@ export class ArkVideoProvider extends VideoProvider {
     }
     const { status, data } = response
     if (status !== 200) {
-      throw new ArkHttpError(`Ark video submission failed [${status}] ${arkStatusMeaning(status)}`, status)
+      throw new ArkHttpError(await this.submitFailureMessage(status, data, signal), status)
     }
     const submit = data as ArkSubmitResponse
     const taskId = submit.id
@@ -391,6 +426,53 @@ export class ArkVideoProvider extends VideoProvider {
     // the endpoint that accepted it, so a later Settings change must not
     // redirect an in-flight poll to a different host.
     return new ArkTaskHandle(taskId, model, this.resolveBaseUrl(), () => this.resolveKey())
+  }
+
+  /**
+   * Compose the failure message for a refused submission. Ark's own
+   * `error.message` is always included — it is the only authoritative reason —
+   * and a refusal naming a model id or endpoint Ark no longer serves is followed
+   * by the ids it does serve. Without that list the refusal reads as "the task
+   * does not exist", which sends a caller looking for a task that was never
+   * created instead of at the model id it configured.
+   * @param status - the HTTP status Ark answered.
+   * @param data - the parsed error body.
+   * @param signal - cancellation forwarded to the model-list request.
+   * @returns the one-line message, a failed model lookup included as a hint.
+   */
+  private async submitFailureMessage(status: number, data: unknown, signal?: AbortSignal): Promise<string> {
+    const detail = arkErrorDetail(data)
+    const code = detail.code === undefined ? '' : `（${detail.code}）`
+    // A 404 on THIS path never means "no such task" — the task was refused
+    // before it existed. Ark's own words are the diagnosis, and the ids it does
+    // serve are the way out; the generic status wording is deliberately skipped.
+    if (isModelNotFound(status, detail)) {
+      const reason = detail.message ?? '模型或接入点不存在（方舟未说明原因）'
+      const available = await this.availableModelHint(signal)
+      return `Ark video submission failed [${status}]${code} ${reason}；${available}`
+    }
+    const reason = detail.message === undefined
+      ? arkStatusMeaning(status)
+      : `${arkStatusMeaning(status)}：${detail.message}`
+    return `Ark video submission failed [${status}]${code} ${reason}`
+  }
+
+  /**
+   * The available-model hint appended to a model-not-found failure. Every
+   * failure on this path is swallowed: the model list is a courtesy, and a
+   * lookup that fails must never replace the real refusal.
+   * @param signal - cancellation forwarded to the model-list request.
+   * @returns a `可用模型：…` line, or why the list could not be read.
+   */
+  private async availableModelHint(signal?: AbortSignal): Promise<string> {
+    try {
+      const models = await this.listModels(signal)
+      const ids = formatModelIds(models)
+      return ids === '' ? '可用模型：方舟未返回任何视频模型' : `可用模型：${ids}`
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      return `可用模型列表获取失败：${reason}`
+    }
   }
 
   async finalize(
@@ -446,24 +528,33 @@ export class ArkVideoProvider extends VideoProvider {
    * Probe the endpoint and key the configuration form holds. A read-only task
    * lookup: an id that cannot exist answers 404, which proves the key
    * authenticated and the service answered without creating a task.
+   *
+   * A row with no key anywhere is reported as `unconfigured`, not as a failure:
+   * nothing was probed, and painting that red would hide the difference between
+   * "fill this in" and "what you filled in is wrong".
    */
   async probe(draft: ProviderProbeDraft): Promise<ProviderProbeResult> {
-    if (draft.apiKey.trim() === '') return { ok: false, message: '未填写 API Key' }
-    const base = draft.baseUrl.trim().replace(/\/+$/, '')
-    if (base === '') return { ok: false, message: '未填写接口地址' }
+    const base = draft.baseUrl.trim() === ''
+      ? this.resolveBaseUrl()
+      : draft.baseUrl.trim().replace(/\/+$/, '')
+    if (base === '') return { status: 'failed', message: '表单未填写接口地址，且该后端也未配置默认端点' }
+    const apiKey = await this.probeKey(draft.apiKey)
+    if (apiKey === undefined) {
+      return { status: 'unconfigured', message: arkUnconfiguredReason(this.apiKeyEnv) }
+    }
     try {
-      const { status } = await getJson(`${base}/contents/generations/tasks/connection-probe`, draft.apiKey)
+      const { status } = await getJson(`${base}/contents/generations/tasks/connection-probe`, apiKey)
       if (status < 500 && status !== 401 && status !== 403) {
-        return { ok: true, message: `连接成功（HTTP ${status}）` }
+        return { status: 'ok', message: `连接成功（HTTP ${status}）` }
       }
       return {
-        ok: false,
+        status: 'failed',
         message: status === 401 || status === 403
           ? `API Key 被拒绝（HTTP ${status}）`
           : `端点返回 HTTP ${status}`,
       }
     } catch (error) {
-      return { ok: false, message: `无法连接端点：${error instanceof Error ? error.message : String(error)}` }
+      return { status: 'failed', message: `无法连接端点：${error instanceof Error ? error.message : String(error)}` }
     }
   }
 

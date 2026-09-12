@@ -7,7 +7,8 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { adapterCatalog, probeViaAdapter } from '../src/adapters.ts'
+import { adapterCatalog, adapterChoice, probeViaAdapter } from '../src/adapters.ts'
+import { ROUBAAI_REGISTER_URL } from '../src/shared.ts'
 
 /** A media registry standing in for a deployment that mounted three adapters. */
 function mediaRegistry(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -30,10 +31,26 @@ describe('adapterCatalog', () => {
     expect(adapterCatalog(new Context())).toEqual({ image: [], video: [], music: [] })
   })
 
-  it('lists the registry names the deployment mounted', () => {
+  it('lists what the deployment mounted with a display name and a key page', () => {
     const ctx = new Context()
     ctx.provide('media', mediaRegistry())
-    expect(adapterCatalog(ctx)).toEqual({ image: ['maizi'], video: ['maizi', 'ark'], music: ['mxapi'] })
+    expect(adapterCatalog(ctx)).toEqual({
+      image: [{ name: 'maizi', displayName: '麦子AI', apiKeyUrl: ROUBAAI_REGISTER_URL }],
+      video: [
+        { name: 'maizi', displayName: '麦子AI', apiKeyUrl: ROUBAAI_REGISTER_URL },
+        { name: 'ark', displayName: '火山引擎', apiKeyUrl: 'https://console.volcengine.com/' },
+      ],
+      // No key page this repository can vouch for: the link is omitted rather
+      // than pointed at a guessed address.
+      music: [{ name: 'mxapi', displayName: 'MxAPI' }],
+    })
+  })
+
+  it('shows an unknown adapter under its own registry name with no key link', () => {
+    expect(adapterChoice('some-future-backend')).toEqual({
+      name: 'some-future-backend',
+      displayName: 'some-future-backend',
+    })
   })
 
   it('reports every category empty when the registry throws', () => {
@@ -72,11 +89,12 @@ describe('probeViaAdapter', () => {
     expect(await probeViaAdapter(ctx, 'video', 'ark', draft)).toBeUndefined()
   })
 
-  it('runs the selected adapter\u2019s own probe with the draft values', async () => {
-    const probe = vi.fn(async () => ({ ok: true, message: '连接成功（HTTP 404）' }))
+  it('runs the selected adapter\u2019s own probe with the draft values and its three-state answer', async () => {
+    const probe = vi.fn(async () => ({ status: 'unconfigured', message: '表单未填写、设置中未保存' }))
     const ctx = new Context()
     ctx.provide('media', mediaRegistry({ video: () => ({ probe }) }))
-    expect(await probeViaAdapter(ctx, 'video', 'ark', draft)).toEqual({ ok: true, message: '连接成功（HTTP 404）' })
+    expect(await probeViaAdapter(ctx, 'video', 'ark', draft))
+      .toEqual({ status: 'unconfigured', message: '表单未填写、设置中未保存' })
     expect(probe).toHaveBeenCalledWith(draft)
   })
 })

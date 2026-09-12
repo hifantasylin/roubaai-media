@@ -28,7 +28,7 @@ These six packages provide the seam, its backends, their configuration surface, 
 |---|---|---|
 | [`media/`](media/README.md) | The provider registry and every model-facing `generate_*` tool | `ctx.media`, `ctx.mediaUrl` |
 | [`media-maizi/`](media-maizi/README.md) | MaiziAI backend for image and video generation | registers on `ctx.media` |
-| [`media-ark/`](media-ark/README.md) | Volcengine Ark backend for video generation | registers on `ctx.media` |
+| [`media-ark/`](media-ark/README.md) | Volcengine Ark backend for image and video generation, and the default for both categories | registers on `ctx.media` |
 | [`media-mxapi/`](media-mxapi/README.md) | MxAPI backend for music generation | registers on `ctx.media` |
 | [`settings/`](settings/README.md) | Settings page and namespace owning each backend's key, endpoint, and models, and the adapter each category runs | owns the `roubaai-video-plugin` settings namespace |
 | [`brand/`](brand/README.md) | Rouba brand occupants for the Web client's sidebar and conversation-hero slots | `slots` (browser half only) |

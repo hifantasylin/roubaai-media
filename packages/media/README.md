@@ -51,6 +51,19 @@ Each generation job appends one line to the workspace cost ledger (`<cwd>/.asset
 
 A tool call with no provider name uses the first registered backend of the kind it needs; `NO_PROVIDER` is a final deny surfaced by the tool guard when none is registered. Mounting or removing a provider bundle therefore changes which backend the tools resolve without touching the seam or its tools.
 
+### Model capability and tiers: which to pick
+
+What a model accepts is stated by the **provider itself** (`capabilities(model)`): the resolution tiers, the pixel floor, the reference-image bound, the aspect ratios. `generate_image`'s `resolution` parameter therefore carries **no enum** — models differ, so a written list would drift from the backend that owns the fact; the call-time check, the default tier, and the move to a model that can serve the request are all derived from that capability.
+
+| What you want | What to pick |
+|---|---|
+| Lightweight composition drafts, fast iteration | lite class + 2K |
+| The 1.5K middle tier | pro class + 1.5K |
+| Large, detailed output | lite class + 3K / 4K |
+| Precise edits / many references / layer splitting | pro class |
+
+Ids carry a date segment and retire, so this table names tier CLASSES (lite / pro), not one id. The default tier is 2K. When a call asks for a tier the configured model does not have but a sibling in the catalogue does, the tool moves that request to the sibling and says so in the job result; when no model can serve it, the call fails naming that model's tiers, its pixel floor, and its siblings' tiers. A backend that reports no capability (Maizi, mxapi) is untouched: no validation, no substitution, no defaulted tier.
+
 -----
 
 <a id="understand-the-implementation"></a>
@@ -72,7 +85,7 @@ The package mirrors the harness's "abstract service plus adapter registration" l
 | [`src/index.ts`](src/index.ts) | Plugin entry: registration of services and tools |
 | [`src/service.ts`](src/service.ts) | The `ctx.media` service definition |
 | [`src/media-local.ts`](src/media-local.ts) | The process-local `MediaRuntimeLocal` registry implementation |
-| [`src/provider.ts`](src/provider.ts) | Image/video/music provider contracts and shared result types |
+| [`src/provider.ts`](src/provider.ts) | Image/video/music provider contracts, the per-model capability descriptor, and shared result types |
 | [`src/tunnel.ts`](src/tunnel.ts) | The `ctx.mediaUrl` local-reference normalizer (static server plus tunnel) |
 | [`src/tools/`](src/tools/) | The seven model-facing tool executors |
 | [`src/cost-ledger.ts`](src/cost-ledger.ts) | The per-workspace media cost ledger and summary fold |
@@ -103,6 +116,8 @@ Read these pages when the package-level contract is not enough.
 #### What the model sees
 
 The `generate_image`, `generate_video`, and `generate_music` tools register once a provider mounts onto `ctx.media`; each call starts a background job through `ctx.jobs` and returns a `kind: background` envelope with a `jobId`, because generation takes tens of seconds to minutes. Tool descriptions name the provider default model and the billing-sensitive options (resolution, reference-image count, audio, frame extraction), and the deny guard answers `no image provider is configured`-style refusals when no backend of the needed kind is registered.
+
+`generate_image`'s `resolution` description deliberately lists no tiers and points at the serving adapter's capability instead: tiers differ per model, and a written list is exactly what produced the invalid call this seam exists to prevent. A finished job's `run` field reports the model, tier, and the pixel size the vendor returned (`run.model` / `run.tier` / `run.size`), plus `run.requestedModel` and `run.switchNote` when the request moved to a sibling model, so the next call can correct itself.
 
 #### Token effect
 

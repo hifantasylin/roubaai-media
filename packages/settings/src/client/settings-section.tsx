@@ -4,10 +4,16 @@
  *
  * Three categories — image, video, music — each render a card list of their
  * providers. Every category carries one built-in default provider whose
- * endpoint and model are read-only; users may add custom providers (endpoint
- * and model editable), switch the provider in use ("使用" turns green
- * "使用中"), and delete custom ones. Writes go through the plugin's own
- * fenced route, never the generic settings RPC.
+ * endpoint is read-only; users may add custom providers (endpoint editable),
+ * switch the provider in use ("使用" turns green "使用中"), and delete custom
+ * ones. Writes go through the plugin's own fenced route, never the generic
+ * settings RPC.
+ *
+ * The model is a choice on EVERY row, built-in included: vendor model ids carry
+ * a date segment and retire, so a deployment must be able to move to a current
+ * one without turning the built-in row into a custom provider. Its control is a
+ * free-text input with the backend's live catalogue under it, read through
+ * `models.list` — the catalogue is the vendor's, not a list this plugin ships.
  *
  * Properties the shell depends on:
  *
@@ -39,9 +45,12 @@ import {
   MEDIA_CATEGORIES,
   MEDIA_CATEGORY_DEFAULT_ADAPTERS,
   MEDIA_CATEGORY_DEFAULTS,
-  ROUBAAI_REGISTER_URL,
+  MEDIA_IMAGE_DEFAULT_TIER,
   resolveRoubaaiMediaSettings,
+  type AdapterChoice,
   type MediaCategory,
+  type MediaModelCapabilityView,
+  type MediaModelOption,
   type ResolvedMediaProvider,
   type ResolvedRoubaaiMediaSettings,
   type SettingsView,
@@ -55,10 +64,63 @@ export type RoubaaiVideoSettingsSectionProps = PropsRuntime<'settings.section'>
 /** Wire code of a refused stale write (mirrors the host's mapping). */
 const CONFLICT_CODE = 'settings-conflict'
 
+/**
+ * A one-row select option: the stored value plus the label a person reads. The
+ * adapter picker renders `label` (the host catalog's display name) and stores
+ * `value` (the registry name); nothing in the client invents either.
+ */
+interface SelectOption {
+  value: string
+  label: string
+  /**
+   * Rendered unselectable. Used for a value the row already stores that the
+   * model's capability no longer lists: it stays visible (an edit must not
+   * silently rewrite a choice) but cannot be re-chosen, so it cannot be saved
+   * as a fresh pairing.
+   */
+  disabled?: boolean
+}
+
+/**
+ * Whether a vendor lifecycle state means "do not pick this for new work". The
+ * state stays visible verbatim (it is the vendor's word) and only its tone is
+ * softened, because a retiring id is still a valid choice for an existing row.
+ */
+function isRetiring(status: string | undefined): boolean {
+  return status !== undefined && /retir|deprecat|offline|expir|unavailable|停|下线|废弃/i.test(status)
+}
+
 /** Map one wire failure to an inline message. */
 function messageOf(error: unknown): string {
   if (error instanceof RoubaaiApiError && error.code === CONFLICT_CODE) return t('conflict')
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * The tone one probe result renders in. Three states, three tones: a row with
+ * no key yet is neutral because it is a to-do, a refusal is red because it is a
+ * failure, and success is green. Two tones for three states is what made an
+ * unconfigured music row look broken.
+ */
+function outcomeClass(result: TestResult): string {
+  switch (result.status) {
+    case 'ok': return css.noticeOk ?? ''
+    case 'unconfigured': return css.noticeNeutral ?? ''
+    default: return css.noticeFail ?? ''
+  }
+}
+
+/**
+ * The line one probe result renders. The state label is localized here and the
+ * reason stays verbatim from the backend: a refusal carries the HTTP status and
+ * the vendor's own message, which is exactly what the reader needs to act.
+ */
+function outcomeText(result: TestResult): string {
+  switch (result.status) {
+    case 'ok': return result.message
+    case 'unconfigured': return `${t('probeUnconfigured')}：${result.message}`
+    default: return `${t('testFailed')}${result.message}`
+  }
 }
 
 /** Extract the ids whose API key the redacted view reports as set. */
@@ -83,6 +145,7 @@ interface EditDraft {
   adapter: string
   baseUrl: string
   model: string
+  resolution: string
 }
 
 /**
@@ -96,14 +159,28 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
   /** Ids whose API key the redacted read reports as stored. */
   const [keySetIds, setKeySetIds] = useState<ReadonlySet<string>>(new Set())
   const [editing, setEditing] = useState<{ category: MediaCategory; providerId: string } | null>(null)
-  const [draft, setDraft] = useState<EditDraft>({ name: '', apiKey: '', baseUrl: '', model: '', adapter: '' })
+  const [draft, setDraft] = useState<EditDraft>({ name: '', apiKey: '', baseUrl: '', model: '', adapter: '', resolution: '' })
   /** Adapters this deployment mounted, per category: a row's available choices. */
-  const [adapterChoices, setAdapterChoices] = useState<Record<MediaCategory, string[]>>({
+  const [adapterChoices, setAdapterChoices] = useState<Record<MediaCategory, AdapterChoice[]>>({
     image: [], video: [], music: [],
   })
   const [error, setError] = useState<string | null>(null)
   const [outcome, setOutcome] = useState<TestResult | null>(null)
   const [busy, setBusy] = useState(false)
+  /** The edited row's model catalogue, as its backend reported it. */
+  const [modelOptions, setModelOptions] = useState<readonly MediaModelOption[]>([])
+  /** Why the catalogue is empty or short (a backend that cannot list models). */
+  const [modelNote, setModelNote] = useState<string>('')
+  /** The picker's filter text: empty shows the whole catalogue. */
+  const [modelQuery, setModelQuery] = useState<string>('')
+  const [modelListBusy, setModelListBusy] = useState(false)
+  const [modelListOpen, setModelListOpen] = useState(false)
+  /**
+   * Which (row, adapter, endpoint) the loaded catalogue belongs to. A catalogue
+   * read is per row and per endpoint, so a list left over from another row must
+   * never be offered as if it were this row's.
+   */
+  const modelListKey = useRef<string>('')
   // The freshest revision, read at commit time: a queued write must observe
   // the previous write's revision, and re-rendering on it is unnecessary.
   const revisionRef = useRef<number | undefined>(undefined)
@@ -177,15 +254,66 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
   const startEdit = (category: MediaCategory, provider: ResolvedMediaProvider): void => {
     setEditing({ category, providerId: provider.id })
     setOutcome(null)
+    resetModelCatalogue()
     setDraft({
       name: provider.name,
       apiKey: '',
       adapter: provider.adapter,
-      // A built-in provider's read-only endpoint/model resolve to the
-      // category constants; a custom provider edits its stored overrides.
+      // A built-in provider's read-only endpoint resolves to the category
+      // constant; a custom provider edits its stored override. A built-in row
+      // resolves to the category default model, which is what its picker shows
+      // as the current choice.
       baseUrl: provider.custom ? provider.baseUrl : '',
-      model: provider.custom ? provider.model : '',
+      model: provider.custom
+        ? provider.model
+        : provider.model !== '' ? provider.model : MEDIA_CATEGORY_DEFAULTS[category].model,
+      resolution: provider.resolution,
     })
+  }
+
+  /** Drop any loaded catalogue: it belongs to the row that was being edited. */
+  const resetModelCatalogue = (): void => {
+    modelListKey.current = ''
+    setModelOptions([])
+    setModelNote('')
+    setModelQuery('')
+    setModelListOpen(false)
+  }
+
+  /**
+   * Read the edited row's model catalogue from its backend. The call carries
+   * the card's draft endpoint and key, so a key that has not been saved yet can
+   * still browse the catalogue. A backend that cannot list models answers an
+   * empty list with a reason, which leaves the free-text input in charge.
+   */
+  const loadModelCatalogue = (category: MediaCategory, provider: ResolvedMediaProvider, force = false): void => {
+    const key = `${category}|${provider.id}|${draft.adapter}|${provider.custom ? draft.baseUrl : ''}`
+    if (!force && modelListKey.current === key && (modelOptions.length > 0 || modelNote !== '')) {
+      setModelListOpen(true)
+      return
+    }
+    modelListKey.current = key
+    setModelListBusy(true)
+    setModelListOpen(true)
+    void api.modelsList({
+      category,
+      adapter: draft.adapter,
+      draft: {
+        // A built-in row's endpoint is read-only; its backend default is what
+        // the catalogue must be read from, so an empty draft means "configured".
+        baseUrl: provider.custom ? draft.baseUrl : '',
+        apiKey: draft.apiKey,
+      },
+    })
+      .then((result) => {
+        setModelOptions(result.models)
+        setModelNote(result.message ?? (result.models.length === 0 ? t('modelEmpty') : ''))
+      })
+      .catch((caught: unknown) => {
+        setModelOptions([])
+        setModelNote(`${t('modelListFailed')}${messageOf(caught)}`)
+      })
+      .finally(() => { setModelListBusy(false) })
   }
 
   /**
@@ -207,23 +335,49 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
       })
     }
     setEditing(null)
+    resetModelCatalogue()
   }
 
   /** Save the edited card: categories wholesale, the key only when typed. */
   const saveEdit = (): void => {
     if (editing === null || busy) return
+    const { category, providerId } = editing
+    const chosenModel = draft.model.trim()
+    const chosenTier = draft.resolution.trim()
+    // The page refuses a pairing it can prove impossible: a tier the chosen
+    // model's capability does not list. Only a STATED capability can block a
+    // save — a backend that reports none, or a catalogue that was never read,
+    // leaves the choice to the tool's own call-time check rather than inventing
+    // a constraint here.
+    const tiers = capabilityOfModel(chosenModel === '' ? MEDIA_CATEGORY_DEFAULTS[category].model : chosenModel)?.tiers
+    if (chosenTier !== '' && tiers !== undefined && !tiers.includes(chosenTier)) {
+      setError(`${t('tierUnsupported')}${chosenTier}（${t('capTiers')}：${tiers.join(' / ')}）`)
+      return
+    }
     setBusy(true)
     setError(null)
     setOutcome(null)
-    const { category, providerId } = editing
     const categoryView = settings[category]
+    const defaults = MEDIA_CATEGORY_DEFAULTS[category]
     const providers = categoryView.providers.map((entry) => entry.id !== providerId ? entry : {
       ...entry,
       name: draft.name.trim(),
       // The adapter is the routing choice for every row, built-in included.
       adapter: draft.adapter,
       baseUrl: entry.custom ? draft.baseUrl.trim() : '',
-      model: entry.custom ? draft.model.trim() : '',
+      // The model is a choice even on a built-in row: vendor ids carry dates
+      // and retire, so a deployment must be able to move to a current one
+      // without turning the built-in row into a custom provider. A built-in row
+      // equal to the category default stores nothing, so a later release can
+      // move the default without a stale pin overriding it.
+      model: entry.custom
+        ? chosenModel
+        : chosenModel === defaults.model ? '' : chosenModel,
+      // The tier is a per-row preference on every row, and deliberately has no
+      // "equal to the default stores nothing" rule: the empty choice IS the
+      // default, so storing '' and storing the default tier mean the same thing
+      // and there is nothing to drop.
+      resolution: chosenTier,
     })
     const keysPatch: Record<string, string> = {}
     if (draft.apiKey.trim() !== '') keysPatch[providerId] = draft.apiKey.trim()
@@ -236,6 +390,7 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
       if (saved) {
         unsavedIds.current.delete(providerId)
         setEditing(null)
+        resetModelCatalogue()
       }
     })
   }
@@ -259,12 +414,13 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
           ...previous[category].providers,
           // A new card starts on the category's built-in backend; retargeting
           // it at another one is a separate choice the editor owns.
-          { id, name: '', custom: true, adapter: MEDIA_CATEGORY_DEFAULT_ADAPTERS[category], baseUrl: '', model: '', apiKey: '' },
+          { id, name: '', custom: true, adapter: MEDIA_CATEGORY_DEFAULT_ADAPTERS[category], baseUrl: '', model: '', resolution: '', apiKey: '' },
         ],
       },
     })
     setEditing({ category, providerId: id })
-    setDraft({ name: '', apiKey: '', adapter: MEDIA_CATEGORY_DEFAULT_ADAPTERS[category], baseUrl: '', model: '' })
+    resetModelCatalogue()
+    setDraft({ name: '', apiKey: '', adapter: MEDIA_CATEGORY_DEFAULT_ADAPTERS[category], baseUrl: '', model: '', resolution: '' })
   }
 
   /** Probe the edited card's endpoint with its draft key. */
@@ -294,11 +450,93 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
   /**
    * The adapter choices for one row: what the deployment mounted, plus the
    * row's stored value when it is not among them — editing a row whose adapter
-   * plugin is not currently mounted must not silently retarget it.
+   * plugin is not currently mounted must not silently retarget it. A name the
+   * host catalog does not describe is shown as itself: the client never invents
+   * a vendor label.
    */
-  const adapterOptions = (category: MediaCategory, current: string): string[] => {
+  const adapterOptions = (category: MediaCategory, current: string): SelectOption[] => {
     const choices = adapterChoices[category]
-    return current !== '' && !choices.includes(current) ? [current, ...choices] : [...choices]
+    const options = choices.map((choice) => ({ value: choice.name, label: choice.displayName }))
+    if (current !== '' && !options.some((option) => option.value === current)) {
+      return [{ value: current, label: current }, ...options]
+    }
+    return options
+  }
+
+  /** The adapter choice the edited row names, for its key page and label. */
+  const adapterChoiceOf = (category: MediaCategory, name: string): AdapterChoice | undefined =>
+    adapterChoices[category].find((choice) => choice.name === name)
+
+  /**
+   * The capability the loaded catalogue states for one model id, when the
+   * edited row's backend reported one. An id absent from the catalogue — typed
+   * by hand, or listed before this read — answers `undefined`, which the page
+   * reads as "not stated" and never as "no constraint".
+   * @param model - the model id the row would run.
+   * @returns the capability, or `undefined` when none was reported.
+   */
+  const capabilityOfModel = (model: string): MediaModelCapabilityView | undefined =>
+    model.trim() === '' ? undefined : modelOptions.find((option) => option.id === model.trim())?.capability
+
+  /**
+   * The facts one model states about itself, as one line: the tiers it accepts
+   * (with the pixel floor that usually explains why a smaller tier is missing),
+   * how many reference images it carries, and the ratios it accepts. Each part
+   * is rendered only when the backend stated it — the page never widens a
+   * capability into a constraint of its own making.
+   * @param capability - the capability to render.
+   * @returns the one-line summary.
+   */
+  const capabilityLine = (capability: MediaModelCapabilityView): string => {
+    const parts: string[] = []
+    if (capability.tiers !== undefined) {
+      const floor = capability.minPixels === undefined
+        ? ''
+        : `（≥ ${capability.minPixels.toLocaleString('en-US')} ${t('capPixelsUnit')}）`
+      parts.push(`${t('capTiers')}：${capability.tiers.join(' / ')}${floor}`)
+    }
+    if (capability.maxRefImages !== undefined) parts.push(`${t('capRefs')}：${capability.maxRefImages}`)
+    if (capability.aspectRatios !== undefined) parts.push(`${t('capRatios')}：${capability.aspectRatios.join(' / ')}`)
+    return parts.join(' · ')
+  }
+
+  /**
+   * The resolution choices the edited model offers. The list comes from that
+   * model's OWN capability, so a pairing the model cannot serve cannot be
+   * picked in the first place — this is the whole point of reading capability
+   * into the form instead of writing a fixed tier list here.
+   *
+   * A tier the row already stores but the capability no longer lists stays
+   * visible and unselectable, so an edit never silently rewrites a choice; the
+   * save path refuses to persist it and says why.
+   * @param model - the model the row would run (the category default when the draft names none).
+   * @returns the select options, the empty one meaning "follow the model default".
+   */
+  const tierOptions = (model: string): SelectOption[] => {
+    const capability = capabilityOfModel(model)
+    const options: SelectOption[] = [{ value: '', label: `${t('tierInherit')}（${MEDIA_IMAGE_DEFAULT_TIER}）` }]
+    for (const tier of capability?.tiers ?? []) options.push({ value: tier, label: tier })
+    const stored = draft.resolution.trim()
+    if (stored !== '' && !options.some((option) => option.value === stored)) {
+      options.push({ value: stored, label: `${stored}${t('tierUnsupportedMark')}`, disabled: true })
+    }
+    return options
+  }
+
+  /**
+   * Adopt a newly chosen model and keep the tier honest: a tier the new model's
+   * capability does not list is dropped back to the default rather than carried
+   * along invisibly. An unstated capability drops nothing — there is no basis
+   * to correct against.
+   * @param category - the row's category.
+   * @param model - the model id just chosen or typed.
+   */
+  const chooseModel = (category: MediaCategory, model: string): void => {
+    const effective = model.trim() === '' ? MEDIA_CATEGORY_DEFAULTS[category].model : model.trim()
+    const tiers = capabilityOfModel(effective)?.tiers
+    setDraft((previous) => previous.resolution !== '' && tiers !== undefined && !tiers.includes(previous.resolution)
+      ? { ...previous, model, resolution: '' }
+      : { ...previous, model })
   }
 
   /** The control one field renders: a select over `options`, else a text input. */
@@ -307,7 +545,7 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
     value: string
     placeholder?: string
     type?: 'text' | 'password'
-    options?: readonly string[]
+    options?: readonly SelectOption[]
     onChange: (next: string) => void
   }): JSX.Element => props.options === undefined
     ? (
@@ -327,7 +565,9 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
         aria-label={props.label}
         onChange={(event) => { props.onChange(event.currentTarget.value) }}
       >
-        {props.options.map((option) => <option key={option} value={option}>{option}</option>)}
+        {props.options.map((option) => (
+          <option key={option.value} value={option.value} disabled={option.disabled === true}>{option.label}</option>
+        ))}
       </select>
     )
 
@@ -338,8 +578,8 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
     value: string
     placeholder?: string
     type?: 'text' | 'password'
-    /** Render a select over these values instead of a text input. */
-    options?: readonly string[]
+    /** Render a select over these options instead of a text input. */
+    options?: readonly SelectOption[]
     onChange?: (next: string) => void
   }): JSX.Element => (
     <div className={css.field}>
@@ -358,6 +598,133 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
     </div>
   )
 
+  /**
+   * The model control: a searchable list of the row's backend catalogue sitting
+   * under a free-text input, with the chosen model's own capability stated
+   * beneath it.
+   *
+   * The input stays authoritative. Vendor ids carry a date segment and retire,
+   * and a catalogue read can fail (no key saved yet, a backend without a
+   * model-list endpoint), so a typed id is never rejected and the list is a
+   * suggestion that additionally shows each model's lifecycle state and — when
+   * its backend states one — the capability that decides which tiers the model
+   * can be asked for. The catalogue belongs to the backend, so it is fetched
+   * for the current adapter and endpoint rather than cached across rows.
+   * @param category - the row's category (which registry serves it).
+   * @param provider - the row being edited (adapter, custom flag).
+   * @param fallbackModel - the model shown when the row stores none.
+   * @returns the model field element tree.
+   */
+  const modelPicker = (
+    category: MediaCategory,
+    provider: ResolvedMediaProvider,
+    fallbackModel: string,
+  ): JSX.Element => {
+    const needle = modelQuery.trim().toLowerCase()
+    const visible = needle === ''
+      ? modelOptions
+      : modelOptions.filter((option) =>
+          option.id.toLowerCase().includes(needle)
+          || (option.label ?? '').toLowerCase().includes(needle))
+    const effectiveModel = draft.model.trim() === '' ? fallbackModel : draft.model.trim()
+    const capability = capabilityOfModel(effectiveModel)
+    return (
+      <div className={css.field}>
+        <span className={css.fieldLabel}>{t('modelTitle')}</span>
+        <input
+          className={css.input ?? ''}
+          type="text"
+          value={draft.model}
+          placeholder={fallbackModel}
+          aria-label={t('modelTitle')}
+          onFocus={() => { loadModelCatalogue(category, provider) }}
+          onChange={(event) => {
+            const next = event.currentTarget.value
+            chooseModel(category, next)
+            setModelQuery(next)
+            setModelListOpen(true)
+          }}
+        />
+        <div className={css.fieldActions}>
+          <button
+            type="button"
+            className={css.linkButton}
+            disabled={modelListBusy}
+            onClick={() => { loadModelCatalogue(category, provider, true) }}
+          >
+            {modelListBusy ? t('modelLoading') : t('modelRefresh')}
+          </button>
+        </div>
+        {modelListOpen && visible.length > 0 && (
+          <div className={css.modelOptions}>
+            {visible.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                className={`${css.modelOption ?? ''} ${isRetiring(option.status) ? css.modelOptionRetiring ?? '' : ''}`}
+                aria-current={option.id === draft.model ? 'true' : undefined}
+                onClick={() => {
+                  chooseModel(category, option.id)
+                  setModelQuery('')
+                  setModelListOpen(false)
+                }}
+              >
+                <span className={css.modelOptionId}>{option.label ?? option.id}</span>
+                {/* What the model accepts, on the row that offers it: choosing
+                    between two ids is a capability decision, so the choice and
+                    the facts must not be two separate reads. */}
+                {option.capability?.tiers === undefined
+                  ? null
+                  : <span className={css.modelOptionTiers}>{(option.capability.tiers ?? []).join('/')}</span>}
+                {option.status === undefined ? null : <span className={css.modelOptionStatus}>{option.status}</span>}
+              </button>
+            ))}
+          </div>
+        )}
+        {/* The selected model's capability, stated once it is known. A model
+            whose backend reported none shows nothing here rather than a guess. */}
+        {capability === undefined ? null : <p className={css.capabilityLine}>{capabilityLine(capability)}</p>}
+        {capability?.note === undefined ? null : <p className={css.fieldHint}>{capability.note}</p>}
+        {modelNote === '' ? null : <p className={css.fieldHint}>{modelNote}</p>}
+        <p className={css.fieldHint}>{t('modelDesc')}</p>
+      </div>
+    )
+  }
+
+  /**
+   * The resolution control: a select over the tiers the edited model's own
+   * capability declares, so an impossible model/tier pairing cannot be chosen.
+   *
+   * It appears only when the model states tiers. A backend that reports none
+   * keeps the section it has always had — no tier control, no invented
+   * constraint — and the empty choice means "follow the default"
+   * ({@link MEDIA_IMAGE_DEFAULT_TIER}).
+   * @param fallbackModel - the model the row runs when it stores none.
+   * @returns the tier field, or `null` when the model states no tiers.
+   */
+  const tierPicker = (fallbackModel: string): JSX.Element | null => {
+    const effectiveModel = draft.model.trim() === '' ? fallbackModel : draft.model.trim()
+    const capability = capabilityOfModel(effectiveModel)
+    if (capability?.tiers === undefined) return null
+    const stored = draft.resolution.trim()
+    const stale = stored !== '' && !capability.tiers.includes(stored)
+    return (
+      <div className={css.field}>
+        <span className={css.fieldLabel}>{t('tierTitle')}</span>
+        {control({
+          label: t('tierTitle'),
+          value: draft.resolution,
+          options: tierOptions(effectiveModel),
+          onChange: (next) => { setDraft((previous) => ({ ...previous, resolution: next })) },
+        })}
+        {/* A stored tier the model no longer lists: visible so the edit does not
+            silently rewrite it, refused at save so it cannot be re-confirmed. */}
+        {!stale ? null : <p className={css.noticeFail} role="alert">{`${t('tierUnsupported')}${stored}`}</p>}
+        <p className={css.fieldHint}>{t('tierDesc')}</p>
+      </div>
+    )
+  }
+
   /** One category's provider cards plus its add affordance. */
   const categoryBlock = (category: MediaCategory): JSX.Element => {
     const categoryView = settings[category]
@@ -372,7 +739,6 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
             const active = categoryView.activeId === provider.id
             const isEditing = editing !== null && editing.category === category && editing.providerId === provider.id
             const keySet = keySetIds.has(provider.id)
-            const displayModel = provider.model !== '' ? provider.model : defaults.model
             const choices = adapterOptions(category, provider.adapter)
             return (
               <div className={css.card} key={provider.id}>
@@ -451,31 +817,27 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
                           placeholder: defaults.baseUrl,
                           onChange: (next) => { setDraft((previous) => ({ ...previous, baseUrl: next })) },
                         })
-                      : (
-                        <>
-                          {field({ label: t('baseUrlTitle'), hint: t('baseUrlReadonly'), value: '' })}
-                          {/* Only the Maizi-backed categories (image/video) key off the
-                              registration page; music's built-in endpoint is MxAPI's. */}
-                          {category === 'music' ? null : (
-                            <a
-                              className={css.getApiKey}
-                              href={ROUBAAI_REGISTER_URL}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              {t('getApiKey')}
-                            </a>
-                          )}
-                        </>
-                      )}
-                    {provider.custom
-                      ? field({
-                          label: t('modelTitle'),
-                          value: draft.model,
-                          placeholder: defaults.model,
-                          onChange: (next) => { setDraft((previous) => ({ ...previous, model: next })) },
-                        })
-                      : field({ label: t('modelTitle'), hint: t('modelReadonly'), value: displayModel })}
+                      : field({ label: t('baseUrlTitle'), hint: t('baseUrlReadonly'), value: '' })}
+                    {/* Where this row's backend issues keys. The URL comes from the
+                        host catalog, one per adapter: a backend with no page this
+                        repository can vouch for shows no link at all rather than a
+                        guess at someone else's address. */}
+                    {(() => {
+                      const choice = adapterChoiceOf(category, draft.adapter)
+                      if (choice?.apiKeyUrl === undefined) return null
+                      return (
+                        <a
+                          className={css.getApiKey}
+                          href={choice.apiKeyUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {`${t('getApiKey')}（${choice.displayName}）`}
+                        </a>
+                      )
+                    })()}
+                    {modelPicker(category, provider, defaults.model)}
+                    {tierPicker(defaults.model)}
                     <div className={css.cardFooter}>
                       <button
                         type="button"
@@ -525,7 +887,7 @@ export function RoubaaiVideoSettingsSection(_props: RoubaaiVideoSettingsSectionP
       <p className={css.intro}>{t('intro')}</p>
       {MEDIA_CATEGORIES.map((category) => categoryBlock(category))}
       {outcome !== null && (
-        <p className={outcome.ok ? css.noticeOk : css.noticeFail} role="status">{outcome.message}</p>
+        <p className={outcomeClass(outcome)} role="status">{outcomeText(outcome)}</p>
       )}
       {error !== null && (
         <p className={css.noticeFail} role="alert">{error}</p>

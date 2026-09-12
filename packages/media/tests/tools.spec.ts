@@ -59,7 +59,7 @@ class StubImageProvider extends ImageProvider {
     return 0.009
   }
   async probe(): Promise<ProviderProbeResult> {
-    return { ok: true, message: 'stub' }
+    return { status: 'ok', message: 'stub' }
   }
   async testConnection(): Promise<boolean> {
     return true
@@ -110,7 +110,7 @@ class StubVideoProvider extends VideoProvider {
     return undefined
   }
   async probe(): Promise<ProviderProbeResult> {
-    return { ok: true, message: 'stub' }
+    return { status: 'ok', message: 'stub' }
   }
   async testConnection(): Promise<boolean> {
     return true
@@ -175,7 +175,11 @@ describe('generate_image tool', () => {
     const properties = (schema!.parameters as { properties: Record<string, unknown> }).properties
     expect(properties.prompt).toMatchObject({ type: 'string' })
     expect(properties.aspectRatio).toMatchObject({ enum: ['1:1', '16:9', '9:16', '4:3', '3:4'] })
-    expect(properties.resolution).toMatchObject({ enum: ['1K', '2K', '4K'] })
+    // No enum: the accepted tiers differ per model and come from the serving
+    // adapter's own capability, so a fixed list here would be a second copy of
+    // a fact the backend owns — the drift this seam exists to prevent.
+    expect(properties.resolution).toMatchObject({ type: 'string' })
+    expect(properties.resolution).not.toHaveProperty('enum')
     expect(properties.quality).toMatchObject({ enum: ['low', 'medium', 'high'] })
   })
 

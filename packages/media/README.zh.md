@@ -51,6 +51,19 @@ kind: "package-bundle"
 
 未指定提供商名的工具调用使用其所需种类下第一个注册的后端；当没有注册任何后端时，`NO_PROVIDER` 是由工具 guard 暴露的最终拒绝。因此挂载或移除提供商 bundle，只会改变工具解析到的后端，而无需触碰 seame 或其工具。
 
+### 模型能力与档位：怎么选
+
+每个模型能接受什么，由**提供商自己上报**（`capabilities(model)`）：可用分辨率档位、像素下限、参考图上限、支持比例。`generate_image` 的 `resolution` 参数因此**没有枚举** —— 各模型档位不同，写死的列表必然与后端脱节；调用时的校验、默认档位、以及"换一个能做的模型"，全部从这份能力派生。
+
+| 想要的效果 | 选什么 |
+|---|---|
+| 轻量试构图、快速迭代 | lite 档 + 2K |
+| 1.5K 中间档 | pro 档 + 1.5K |
+| 大图细节 | lite 档 + 3K / 4K |
+| 精细编辑 / 多图参考 / 图层拆分 | pro 档 |
+
+模型 id 带日期段且会退役，所以这张表说的是**档位类**（lite / pro），不是某个具体 id。默认档位是 2K。调用要的档位当前模型没有、而目录里的兄弟模型有时，工具会把这次请求改到兄弟模型，并在任务结果里写明；没有任何模型能做时，调用失败并给出该模型支持的档位、像素下限，以及兄弟模型的档位。不做能力上报的后端（麦子AI、mxapi）保持原样：不校验、不替换、不补默认档位。
+
 -----
 
 <a id="understand-the-implementation"></a>
@@ -72,7 +85,7 @@ kind: "package-bundle"
 | [`src/index.ts`](src/index.ts) | 插件入口：服务与工具的注册 |
 | [`src/service.ts`](src/service.ts) | `ctx.media` 服务定义 |
 | [`src/media-local.ts`](src/media-local.ts) | 进程内 `MediaRuntimeLocal` 注册表实现 |
-| [`src/provider.ts`](src/provider.ts) | 图像/视频/音乐提供商契约与共享结果类型 |
+| [`src/provider.ts`](src/provider.ts) | 图像/视频/音乐提供商契约、按模型的能力描述与共享结果类型 |
 | [`src/tunnel.ts`](src/tunnel.ts) | `ctx.mediaUrl` 本地引用归一化器（静态服务器加隧道） |
 | [`src/tools/`](src/tools/) | 七个模型可见工具的执行器 |
 | [`src/cost-ledger.ts`](src/cost-ledger.ts) | 按工作区的媒体成本账本与汇总折叠 |
@@ -103,6 +116,8 @@ kind: "package-bundle"
 #### 模型看到什么
 
 `generate_image`、`generate_video` 与 `generate_music` 工具在一个提供商挂载到 `ctx.media` 后注册；每次调用都通过 `ctx.jobs` 启动后台任务并返回携带 `jobId` 的 `kind: background` 封装，因为生成耗时数十秒到数分钟。工具描述写明提供商默认模型与计费敏感选项（分辨率、参考图数量、音频、抽帧）；当所需种类没有注册后端时，deny guard 会给出 `no image provider is configured` 一类的拒绝。
+
+`generate_image` 的 `resolution` 描述刻意不列档位，而是指向"能力来自服务该调用的适配器"：档位随模型而变，写死的列表正是此前那次无效调用的成因。任务结果的 `run` 字段回报实际运行的模型、档位与厂商返回的像素尺寸（`run.model` / `run.tier` / `run.size`），必要时还有 `run.requestedModel` 与 `run.switchNote`，让下一次调用能据此自我修正。
 
 #### Token 影响
 

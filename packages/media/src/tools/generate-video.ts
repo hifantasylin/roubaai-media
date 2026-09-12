@@ -139,7 +139,7 @@ export function registerGenerateVideo(ctx: Context): () => void {
       // mounted, and the Settings page selects the adapter — a schema cannot
       // enumerate a runtime configuration. The adapter validates the id and
       // names its own models when it rejects one.
-      model: { type: 'string', required: true, description: '模型档位（必填）。取值随当前适配器：麦子科技用 doubao-seedance-2.0-mini / -fast / doubao-seedance-2.0 / doubao-seedance-2.5；火山方舟直连用方舟自己的 Model ID（如 doubao-seedance-1-5-pro-251215）。填错时由适配器报错并列出可用模型。' },
+      model: { type: 'string', required: true, description: '模型档位（必填）。取值随当前适配器：麦子科技用 doubao-seedance-2.0-mini / -fast / doubao-seedance-2.0 / doubao-seedance-2.5；火山方舟直连用方舟自己的 Model ID（如 doubao-seedance-2-0-mini-260615；方舟会更换与退役 id，实际可用列表以适配器报错时给出的为准）。填错时由适配器报错并列出可用模型。' },
       imageUrls: { type: 'array', items: { type: 'string' }, description: 'Optional reference image URLs (max 30; Seedance 2.0 上限 9). 与 imageWithRoles 互斥。' },
       imageWithRoles: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Role-tagged images (首帧/尾帧/参考图, 如 [{ role: "first_frame", image_url: "..." }]). 与 imageUrls 互斥; 使用后不可再用 videoUrls/audioUrls。' },
       videoUrls: { type: 'array', items: { type: 'string' }, description: 'Optional reference video URLs (max 10; Seedance 2.0 上限 3; stacks reference billing).' },

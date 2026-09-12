@@ -65,7 +65,7 @@ class RecordingImageProvider extends ImageProvider {
     return undefined
   }
   async probe(): Promise<ProviderProbeResult> {
-    return { ok: true, message: 'stub' }
+    return { status: 'ok', message: 'stub' }
   }
   async testConnection(): Promise<boolean> {
     return true

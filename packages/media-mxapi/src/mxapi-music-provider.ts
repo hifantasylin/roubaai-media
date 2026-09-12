@@ -115,22 +115,26 @@ export class MxapiMusicProvider extends MusicProvider {
   }
 
   /**
-   * Resolve the API key for one operation: the Settings page's active music
-   * provider wins, then the credential store (`MXAPI_API_KEY`) — the same
-   * order the Maizi providers use (settings first, then credentials/env).
+   * The key an operation should use, or `undefined` when this deployment has
+   * none. Order: the form's draft key, the stored Settings row, then the
+   * credential store / `MXAPI_API_KEY`. `undefined` is what separates "nothing
+   * is configured yet" from "the backend refused what we sent".
    */
-  private async resolveKey(): Promise<string> {
+  private async configuredKey(draftKey = ''): Promise<string | undefined> {
+    const typed = draftKey.trim()
+    if (typed !== '') return typed
     const stored = readActiveMediaProvider(this.ctx, DEFAULT_SETTINGS_NAMESPACE, 'music').apiKey
-    if (stored !== undefined) return stored
+    if (stored !== undefined && stored.length > 0) return stored
     const credentials = this.ctx.get('credentials')
-    if (credentials === undefined) {
-      throw new MissingCredentialError(this.apiKeyEnv)
-    }
+    if (credentials === undefined) return undefined
     const hit = await credentials.resolve(credentialRef(this.apiKeyEnv))
-    if (hit === undefined || hit.value === undefined || hit.value === '') {
-      throw new MissingCredentialError(this.apiKeyEnv)
-    }
-    return hit.value
+    return hit !== undefined && hit.value.length > 0 ? hit.value : undefined
+  }
+
+  private async resolveKey(): Promise<string> {
+    const key = await this.configuredKey()
+    if (key === undefined) throw new MissingCredentialError(this.apiKeyEnv)
+    return key
   }
 
   private async request<T>(path: string, init: RequestInit | undefined, signal?: AbortSignal): Promise<T> {
@@ -236,37 +240,60 @@ export class MxapiMusicProvider extends MusicProvider {
   }
 
   /**
-   * Probe the endpoint and key a configuration form holds. The music API is not
-   * OpenAI-compatible and has no `GET /models`, so the cheapest authenticated
-   * request is a task lookup: an unknown id answers a business-JSON 404, which
-   * still proves the endpoint is reachable and the key accepted (an
-   * unauthorized key is refused before the id is read).
+   * Probe the endpoint and key a configuration form holds.
+   *
+   * The music API is not OpenAI-compatible and has no `GET /models`, so the
+   * cheapest authenticated request is a task lookup — and it is read-only by
+   * construction (`GET /task?id=…`), which is the property that matters: a
+   * connection test must never create a billable generation. MxAPI answers an
+   * unauthenticated or badly authenticated request with HTTP 401 plus a
+   * business body (`缺少必要的认证头` / `无效的API密钥`); that message is carried
+   * through verbatim, because it is the only thing that distinguishes "no
+   * header reached the API" from "the key is wrong".
+   *
+   * A row with no key anywhere is reported as `unconfigured` rather than as a
+   * failure: nothing was probed, and painting that red hides the difference
+   * between "fill this in" and "what you filled in is wrong".
    */
   async probe(draft: ProviderProbeDraft): Promise<ProviderProbeResult> {
-    if (draft.apiKey.trim() === '') return { ok: false, message: '未填写 API Key' }
-    const base = draft.baseUrl.trim().replace(/\/+$/, '')
-    if (base === '') return { ok: false, message: '未填写接口地址' }
+    const base = draft.baseUrl.trim() === ''
+      ? this.baseUrl
+      : draft.baseUrl.trim().replace(/\/+$/, '')
+    if (base === '') return { status: 'failed', message: '表单未填写接口地址，且该后端也未配置默认端点' }
+    const apiKey = await this.configuredKey(draft.apiKey)
+    if (apiKey === undefined) {
+      return {
+        status: 'unconfigured',
+        message: `表单未填写、设置中未保存，环境变量 ${this.apiKeyEnv} 也未提供`,
+      }
+    }
     try {
       const response = await fetch(`${base}/task?id=connection-probe`, {
         method: 'GET',
-        headers: { authorization: `Bearer ${draft.apiKey}`, accept: 'application/json' },
+        headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' },
         signal: AbortSignal.timeout(15_000),
       })
-      if (response.ok) return { ok: true, message: `连接成功（HTTP ${response.status}）` }
-      if (response.status === 404) {
-        const body = await response.json().catch(() => undefined) as { code?: unknown, message?: unknown } | undefined
-        if (typeof body === 'object' && body !== null && body['code'] !== undefined) {
-          return { ok: true, message: `连接成功（HTTP 404，${String(body['message'] ?? '任务不存在')}）` }
-        }
+      const body = await response.json().catch(() => undefined) as
+        { code?: unknown, message?: unknown } | undefined
+      const apiMessage = typeof body?.message === 'string' && body.message.length > 0 ? body.message : undefined
+      if (response.ok) {
+        return { status: 'ok', message: `连接成功（HTTP ${response.status}）` }
       }
+      // A business-JSON answer proves MxAPI itself replied (a gateway error
+      // would not carry `code`), and an unknown task id is exactly what a probe
+      // id produces. That is a working endpoint with a working key.
+      if (response.status === 404 && typeof body?.code !== 'undefined') {
+        return { status: 'ok', message: `连接成功（HTTP 404，${apiMessage ?? '任务不存在'}）` }
+      }
+      const detail = apiMessage === undefined ? '' : `：${apiMessage}`
       return {
-        ok: false,
+        status: 'failed',
         message: response.status === 401 || response.status === 403
-          ? `API Key 被拒绝（HTTP ${response.status}）`
-          : `端点返回 HTTP ${response.status}`,
+          ? `API Key 被拒绝（HTTP ${response.status}）${detail}`
+          : `端点返回 HTTP ${response.status}${detail}`,
       }
     } catch (error) {
-      return { ok: false, message: `无法连接端点：${error instanceof Error ? error.message : String(error)}` }
+      return { status: 'failed', message: `无法连接端点：${error instanceof Error ? error.message : String(error)}` }
     }
   }
 

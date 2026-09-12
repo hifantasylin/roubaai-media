@@ -76,19 +76,35 @@ export interface ImageGenerationResult {
    * reference; this URL dies after provider expiry.
    */
   resultUrl?: string
+  /**
+   * What the run actually did — model, tier, and the vendor-reported pixel
+   * size — when the provider can state it. Optional so a provider that has not
+   * been taught to report it keeps working unchanged; the tool synthesizes a
+   * minimal echo from `providerMeta` for those.
+   */
+  run?: ImageRunInfo
   /** Provider raw return (URL / taskId), for logs and replay. */
   providerMeta: { provider: string; model: string; costUsd?: number }
 }
 
 export interface ImageGenerateInput {
   prompt: string
+  /**
+   * Explicit model override. Absent means "the model this provider is
+   * configured to use" (the Settings page's active row, else its own default),
+   * which is the ordinary case. The `generate_image` tool sets it only when the
+   * configured model cannot serve the requested resolution tier and a sibling
+   * model can; a provider that cannot honour an override ignores it and names
+   * the model it actually used in `providerMeta.model`.
+   */
+  model?: string
   /** Reference image URLs to guide/edit the generation (max 9; the provider truncates). */
   refImages?: string[]
   width?: number
   height?: number
   /** Aspect ratio like '1:1' | '16:9'; mutually exclusive with width/height. */
   aspectRatio?: string
-  /** Resolution '1K' | '2K' | '4K'. */
+  /** Resolution tier (e.g. '1K' | '1.5K' | '2K' | '3K' | '4K'); the accepted set is per model. */
   resolution?: string
   /** Quality 'low' | 'medium' | 'high'. */
   quality?: string
@@ -110,12 +126,140 @@ export interface ProviderProbeDraft {
   model?: string
 }
 
-/** Outcome of a connectivity probe. */
+/**
+ * Outcome of a connectivity probe, as one of three states.
+ *
+ * The distinction matters because "nobody has configured this backend yet" and
+ * "this backend was configured and refused" are different situations for the
+ * person looking at the page: the first is a neutral to-do, the second is a
+ * failure that needs the vendor's own reason. Collapsing both into one boolean
+ * paints an empty row red, which teaches the reader to ignore red.
+ */
 export interface ProviderProbeResult {
-  /** Whether the endpoint answered and accepted the key. */
-  ok: boolean
-  /** Human-readable outcome: the status, or why the probe failed. */
+  /**
+   * `ok` — the endpoint answered and accepted the key.
+   * `unconfigured` — no key exists anywhere (form draft, stored settings, or
+   * the provider's own environment fallback), so nothing was probed.
+   * `failed` — a key exists and the probe did not succeed.
+   */
+  status: 'ok' | 'unconfigured' | 'failed'
+  /**
+   * Human-readable outcome. For `unconfigured` this is the reason fragment the
+   * caller prefixes with its own "no key configured" label (e.g. "form empty,
+   * nothing stored, ARK_API_KEY unset"); for `failed` it carries the HTTP
+   * status and the backend's own error message.
+   */
   message: string
+}
+
+/**
+ * One model a backend currently offers, as the vendor reports it. Returned by
+ * the optional {@link ImageProvider.listModels} /
+ * {@link VideoProvider.listModels} capability.
+ *
+ * Vendor model ids are NOT a stable contract: they embed a release or date
+ * segment (`doubao-seedream-5-0-pro-260628`, `doubao-seedance-2-0-260128`), a
+ * vendor renames or re-dates them between releases, and it retires older ids on
+ * its own schedule. A caller that hardcodes an id therefore breaks on a date it
+ * cannot see; it must ask the backend what exists right now and pick from that
+ * answer, treating any locally configured id as a hint rather than a fact.
+ */
+export interface MediaModelInfo {
+  /** The id to send on a request (what the backend answers `GET /models` with). */
+  id: string
+  /** Display name, when the backend states one; callers fall back to `id`. */
+  label?: string
+  /** Vendor lifecycle state when reported (e.g. `available`), else omitted. */
+  status?: string
+  /**
+   * Capability tags the backend reports for this id (Ark's `task_type`, e.g.
+   * `VideoGeneration` / `ImageGeneration`), verbatim. Absent when the backend
+   * reports none — an absent list means "unknown", never "no capability".
+   */
+  taskTypes?: string[]
+}
+
+/**
+ * What ONE model of an image backend accepts, as a machine-readable descriptor.
+ *
+ * It exists because per-model capability is a fact only the backend owns: the
+ * resolution tiers a model accepts, the pixel floor below which it refuses a
+ * size, how many references it takes, which ratios it serves. Written a second
+ * time in a tool schema or a settings page, that fact drifts the moment the
+ * vendor ships a model — and the drift shows up as a rejected, billable call.
+ * So the provider states it here, and every consumer (the model at tool-call
+ * time, the Settings page at configuration time) derives from this one source.
+ *
+ * Every field but `id` is optional DELIBERATELY: a backend that only knows some
+ * of these says only those, and a consumer must read an absent field as
+ * "not stated", never as "no such thing". A provider that states nothing at all
+ * (see {@link ImageProvider.capabilities}) keeps the seam's original
+ * passthrough behavior.
+ *
+ * A consumer looking for a SIBLING model — one that covers a tier this model
+ * does not — finds it through the backend's catalogue (`listModels`), asking
+ * this accessor about each id there, rather than from a second static list:
+ * vendor ids carry date segments, so a sibling id hardcoded beside this one
+ * would go stale exactly like the id it substitutes for.
+ */
+export interface MediaModelCapability {
+  /** The id a request names (the same id the backend's catalogue reports). */
+  id: string
+  /**
+   * Short class label the diagnostic text can use in place of the full id
+   * (`lite`, `pro`, `seedance-2.5`). Absent falls back to `id`.
+   */
+  label?: string
+  /**
+   * Resolution tiers this model accepts, in the backend's own spelling
+   * (`['1K', '1.5K', '2K']`). Absent means "not stated", which consumers must
+   * treat as "anything may work" rather than "nothing works".
+   */
+  tiers?: readonly string[]
+  /**
+   * Pixel floor: a request whose resolved size is smaller than this is refused
+   * by the backend. It is usually also WHY a smaller tier is missing from
+   * {@link tiers} (a tier below the floor is physically unservable), which is
+   * why the tool's teaching error quotes it.
+   */
+  minPixels?: number
+  /** Most reference images one request may carry. */
+  maxRefImages?: number
+  /** Aspect ratios this model accepts (`['1:1', '16:9']`); absent means "not stated". */
+  aspectRatios?: readonly string[]
+  /** Short Chinese hint a person reads on the Settings page (one line). */
+  note?: string
+}
+
+/**
+ * Resolution tier the image tool asks for when the caller names none and the
+ * model states its tiers. It is the lowest tier every current Seedream
+ * generation shares, so the default is servable on the widest set of models.
+ * A provider that states no capability keeps its own default instead — the
+ * seam never overrides a backend that has not declared tiers.
+ */
+export const DEFAULT_IMAGE_RESOLUTION = '2K'
+
+/**
+ * What an image run actually did, echoed on the result so the caller can
+ * self-correct on its next call: the model it ran on, the tier it asked for,
+ * and the pixel size the vendor reported back.
+ */
+export interface ImageRunInfo {
+  /** The model the request ran on (the provider's configured one, or a sibling the tool selected). */
+  model: string
+  /**
+   * The resolution tier the request carried (the caller's, the row's, or the
+   * default). Absent only when neither the caller nor the provider named one —
+   * a backend that declares no capability and was given no tier.
+   */
+  tier?: string
+  /** Pixel size the vendor reported for the produced image (`WxH`), when it reports one. */
+  size?: string
+  /** The model the caller asked for, present only when the run moved to another one. */
+  requestedModel?: string
+  /** Short Chinese explanation of a move to another model. */
+  switchNote?: string
 }
 
 /**
@@ -166,7 +310,7 @@ export abstract class ImageProvider {
    * provider: the shared tool records what a backend charges, so it owns no
    * rate table of its own.
    * @param model - the model the run used.
-   * @param resolution - the requested resolution tier ('1K', '2K', '4K').
+   * @param resolution - the resolution tier the run asked for.
    * @returns the estimated USD cost, or `undefined` when unpriceable.
    */
   abstract estimateCostUsd(model: string, resolution: string): number | undefined
@@ -183,6 +327,58 @@ export abstract class ImageProvider {
 
   /** Connectivity test (config UI / diagnostics): no args, resolves the key internally. */
   abstract testConnection(): Promise<boolean>
+}
+
+/**
+ * Optional model-catalogue capability of an image backend, declared as a
+ * merged interface rather than an abstract member so a backend that cannot
+ * enumerate its models simply does not implement it — the capability is
+ * genuinely optional, while an abstract member would make it mandatory for
+ * every provider. Callers detect it structurally
+ * (`typeof provider.listModels === 'function'`); an implementer declares its
+ * members `override` because the merged members still belong to the class.
+ */
+export interface ImageProvider {
+  /**
+   * Describe what one of this backend's models accepts, when the backend knows.
+   *
+   * This is the single source of truth for per-model capability: the tool
+   * validates a requested resolution against it BEFORE submitting, so a request
+   * the vendor would refuse never reaches a billable endpoint, and the Settings
+   * page renders the same facts rather than restating them. A backend that
+   * cannot describe its models omits this member entirely and keeps the seam's
+   * original passthrough behavior — no validation, no substitution.
+   * @param model - the model to describe; omitted describes the model this
+   * provider is currently configured to run (its Settings-page row, else its
+   * own default).
+   * @returns the descriptor, or `undefined` when this backend cannot state one
+   * for that id (including an id it does not recognize).
+   */
+  capabilities?(model?: string): MediaModelCapability | undefined
+  /**
+   * List the image models this backend offers right now, when it can enumerate
+   * them.
+   *
+   * Vendor ids carry date segments and retire, so this is the only sound way to
+   * learn what a deployment may actually request — a caller must not treat its
+   * configured id as still valid.
+   * @param signal - cancellation forwarded to the model-list request.
+   * @returns the models the backend reports, or an empty list when it offers none.
+   */
+  listModels?(signal?: AbortSignal): Promise<MediaModelInfo[]>
+  /**
+   * List models against the values a configuration form is looking at — an
+   * endpoint and an API key that have not been saved yet — when the backend can
+   * use them. Companion to {@link ImageProvider.listModels}: a form asks with
+   * its draft so a catalogue can be browsed, and a key validated, before
+   * anything is stored. A backend that omits this is asked through
+   * `listModels`, which reads the stored configuration.
+   * @param draft - the endpoint and key the form holds; an empty field means
+   * "use the configured value".
+   * @param signal - cancellation forwarded to the model-list request.
+   * @returns the models the backend reports.
+   */
+  listModelsWithDraft?(draft: ProviderProbeDraft, signal?: AbortSignal): Promise<MediaModelInfo[]>
 }
 
 /** Video generation result: a unified media reference plus the raw task id. */
@@ -288,6 +484,41 @@ export abstract class VideoProvider {
   abstract probe(draft: ProviderProbeDraft): Promise<ProviderProbeResult>
   /** Connectivity test: no args, resolves the key internally. */
   abstract testConnection(): Promise<boolean>
+}
+
+/**
+ * Optional model-catalogue capability of a video backend, declared as a merged
+ * interface rather than an abstract member so a backend that cannot enumerate
+ * its models simply does not implement it. Callers detect it structurally
+ * (`typeof provider.listModels === 'function'`); an implementer declares its
+ * members `override` because the merged members still belong to the class.
+ */
+export interface VideoProvider {
+  /**
+   * List the video models this backend offers right now, when it can enumerate
+   * them.
+   *
+   * Vendor ids carry date segments and retire, so this is the only sound way to
+   * learn what a deployment may actually request — a caller must not treat its
+   * configured id as still valid. It is also the recovery path when a
+   * submission is refused for an unknown or retired model id.
+   * @param signal - cancellation forwarded to the model-list request.
+   * @returns the models the backend reports, or an empty list when it offers none.
+   */
+  listModels?(signal?: AbortSignal): Promise<MediaModelInfo[]>
+  /**
+   * List models against the values a configuration form is looking at — an
+   * endpoint and an API key that have not been saved yet — when the backend can
+   * use them. Companion to {@link VideoProvider.listModels}: a form asks with
+   * its draft so a catalogue can be browsed, and a key validated, before
+   * anything is stored. A backend that omits this is asked through
+   * `listModels`, which reads the stored configuration.
+   * @param draft - the endpoint and key the form holds; an empty field means
+   * "use the configured value".
+   * @param signal - cancellation forwarded to the model-list request.
+   * @returns the models the backend reports.
+   */
+  listModelsWithDraft?(draft: ProviderProbeDraft, signal?: AbortSignal): Promise<MediaModelInfo[]>
 }
 
 /** Music generation input (Suno-style: inspiration OR custom mode). */

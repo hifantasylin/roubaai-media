@@ -28,7 +28,7 @@ kind: "package-group"
 |---|---|---|
 | [`media/`](media/README.zh.md) | 提供方注册表与全部面向模型的 `generate_*` 工具 | `ctx.media`、`ctx.mediaUrl` |
 | [`media-maizi/`](media-maizi/README.zh.md) | 图像与视频生成的 MaiziAI 后端 | 注册到 `ctx.media` |
-| [`media-ark/`](media-ark/README.zh.md) | 视频生成的火山方舟后端 | 注册到 `ctx.media` |
+| [`media-ark/`](media-ark/README.zh.md) | 图像与视频生成的火山方舟后端，也是这两个类别的默认后端 | 注册到 `ctx.media` |
 | [`media-mxapi/`](media-mxapi/README.zh.md) | 音乐生成的 MxAPI 后端 | 注册到 `ctx.media` |
 | [`settings/`](settings/README.zh.md) | 持有每个后端密钥、端点与模型的设置页面与命名空间，并决定每个类别运行的适配器 | 持有 `roubaai-video-plugin` 设置命名空间 |
 | [`brand/`](brand/README.zh.md) | 填充 Web 客户端侧边栏与会话 Hero 插槽的 Rouba 品牌占位者 | `slots`（仅浏览器半场） |
