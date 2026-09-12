@@ -1,0 +1,11 @@
+node_modules/
+lib/
+dist/
+*.tsbuildinfo
+.DS_Store
+
+# Repo-local pnpm store, used when the machine-wide store cannot be trusted.
+.pnpm-store/
+
+# Electron/crashpad diagnostics written into the cwd by tool shims.
+debug.log

@@ -1,0 +1,5 @@
+# dsh bundle layer: mount the MxAPI music provider onto ctx.media. The music
+# provider resolves MXAPI_API_KEY per operation.
+- insert:
+    - id: roubaai-media-mxapi
+      name: '@roubaai/media-mxapi'

@@ -1,0 +1,5 @@
+# dsh bundle layer: mount the MaiziAI media provider onto ctx.media. The
+# image and video providers resolve MAIZI_API_KEY per operation.
+- insert:
+    - id: roubaai-media-maizi
+      name: '@roubaai/media-maizi'

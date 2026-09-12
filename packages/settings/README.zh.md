@@ -1,0 +1,86 @@
+---
+description: "roubaai video plugin 的提供方配置：设置命名空间、服务于它的受限 JSON 路由，以及用于编辑提供方密钥、端点与模型的设置页面区块。"
+kind: "package-bundle"
+---
+
+# @roubaai/settings
+
+[English](README.md) | 中文
+
+## 概述
+
+`@roubaai/settings` 持有媒体栈的配置面。它的宿主机半场注册 `roubaai-video-plugin` 设置命名空间，并通过本插件自己的受限 JSON 路由提供服务；浏览器半场贡献设置页面区块，供人填写提供方密钥、端点、图像模型与视频模型，并执行连接测试。媒体提供方在每次操作时读取这些值，因此在页面上修改无需重启、也无需改动环境变量。当某个部署希望让使用者从浏览器配置媒体生成、而不是去导出 API key 时，选择本包。
+
+## 目录
+
+- [使用本包](#use-this-package)
+- [了解实现](#understand-the-implementation)
+- [延伸阅读](#further-exploration)
+- [模型体验](#model-experience)
+- [已知限制与未决工作](#known-limitations-and-deferred-work)
+- [开发备注](#dev-note)
+
+-----
+
+<a id="use-this-package"></a>
+## 使用本包
+
+把这一行与它所配置的媒体行一起挂载。该行注入 `webServer` 与 `settings`，因此只能挂载在同时具备这两者的组合里。
+
+```yaml
+- id: roubaai-settings
+  name: '@roubaai/settings'
+  inject: [webServer, settings]
+```
+
+该行自身不接受配置；它管理的每个值都在设置页面上编辑。浏览器半场加载后，区块出现在设置页中；保存会写入命名空间的值，**测试连接**则用已保存的密钥向端点发一个只读探测。
+
+| 字段 | 作用 |
+|---|---|
+| API key | `secret` 角色字段：只写入，绝不回传浏览器。页面只显示"是否已保存"，不显示其值。 |
+| 端点基址 | 覆盖提供方的默认 API 基址；留空表示使用提供方默认值。 |
+| 图像模型 / 视频模型 | 覆盖每次生成所用的模型；留空表示使用提供方配置的默认值。 |
+
+<a id="understand-the-implementation"></a>
+## 了解实现
+
+宿主机半场用 schemastery schema 注册命名空间，并通过 `/api/roubaai-video` 下的自有路由提供服务，而不是走 harness 的设置 RPC：后者只向配置客户端提供白名单命名空间，第三方命名空间只能通过这种方式到达浏览器界面。该路由被限制为同源请求，暴露三个操作——读取带修订号的脱敏值、在回显该修订号的前提下写入、以及执行连接测试。测试必须在服务端运行，这是由其性质决定的：它需要明文密钥，而明文密钥绝不过线。
+
+浏览器半场只 import 本包那个无依赖的 `shared` 模块，因此不会有 schema 库进入客户端包。它注入一个 `settings.section` 插槽占位者，并与那条受限路由通信。
+
+与提供方之间的契约刻意只停留在数据层面：它们按名字读取命名空间并取四个字段，不 import 本包。从未打开过设置页的部署完全不受影响——提供方会回落到凭据存储与环境变量。
+
+<a id="further-exploration"></a>
+## 延伸阅读
+
+- [`media-maizi/`](../media-maizi/README.zh.md) — 本页所配置密钥、端点与模型的图像与视频后端。
+- [`media-mxapi/`](../media-mxapi/README.zh.md) — 读取同一命名空间的音乐后端。
+- [媒体子系统参考](../../../docs/subsystems/media.zh.md) — 这些值所供给的提供方注册表。
+
+<a id="model-experience"></a>
+## 模型体验
+
+无。本包只持有提供方配置命名空间与它的设置页面，不注册任何工具、提示词区块或工具参数。
+
+#### KV Cache effect
+
+无；本包既不组装也不发送提供方请求。
+
+<a id="known-limitations-and-deferred-work"></a>
+## 已知限制与未决工作
+
+- 一个命名空间覆盖所有读取它的提供方，因此若想让图像与视频使用不同端点，就需要第二个命名空间。
+- 连接测试只能证明密钥通过鉴权且服务有应答，不能证明该密钥可用某个具体模型。
+- 页面不展示提供方上报的费用；账本按每次生成记录。
+
+<a id="dev-note"></a>
+### 开发备注
+
+<details>
+<summary>维护者工作上下文 —— 点击展开</summary>
+
+命名空间放在宿主机平面，是因为设置命名空间是进程级单例：若由提供方行注册，它就会随着该行所在的按会话 realm 一起出现和消失。
+
+路由刻意限制为同源请求。它只返回密钥的**存在性**而非其值；写入必须回显上一次读取返回的修订号，因此过期表单无法静默覆盖较新的密钥。
+
+</details>

@@ -1,0 +1,13 @@
+# The harness ecosystem is LF everywhere; keep this repo's line endings stable
+# across Windows checkouts so diffs stay comparable with the upstream sources.
+* text=auto eol=lf
+
+# Binary assets must never be line-ending translated.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.mp4 binary
+*.mp3 binary
+*.ico binary

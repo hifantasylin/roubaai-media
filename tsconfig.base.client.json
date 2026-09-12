@@ -1,0 +1,9 @@
+{
+  // Browser-side compiler shape: React JSX plus the DOM library API. Packages
+  // whose host half also reads Node globals narrow `types` locally.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"]
+  }
+}

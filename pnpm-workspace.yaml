@@ -1,0 +1,25 @@
+packages:
+  - packages/*
+
+# Local packages resolve to each other's workspace sources during development;
+# `pnpm pack` rewrites the `workspace:^` ranges to the concrete versions the
+# published tarballs carry.
+linkWorkspacePackages: true
+
+# pnpm 10+ blocks dependencies that ship install/build scripts until each is
+# reviewed here (strictDepBuilds: an unlisted script is a hard install error).
+# We deny by default; nothing in this closure genuinely needs one.
+allowBuilds: {}
+
+# `pnpm run` re-runs install when the lockfile looks stale. This repo installs
+# explicitly (dev loop and release job both do), so the implicit pass only adds
+# a second full resolution before every build.
+verifyDepsBeforeRun: false
+
+# The active supply-chain policy rejects packages published within a release-age
+# window. Every runtime dependency here is the harness's own pinned closure, so
+# the gate can only ever reject a transitive package the harness itself ships —
+# name those explicitly instead of widening the window for the whole repo.
+minimumReleaseAgeExclude:
+  # Transitive dependency of @deepseek-ai/dsh-host-webserver@0.1.5-rc.1.
+  - compression@1.8.2

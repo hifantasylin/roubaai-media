@@ -1,0 +1,22 @@
+# @roubaai/settings bundle layer: mount the provider-configuration owner.
+#
+# The host half registers the `roubaai-video-plugin` settings namespace and
+# serves it through the plugin's own fenced JSON route (the DSH settings RPC
+# domain serves only allowlisted namespaces to configuration clients, so a
+# third-party namespace reaches its browser surface this way). The client half
+# contributes the matching Settings page section.
+#
+# This patch deliberately mounts ONLY this plugin. The media stack it
+# configures (`media`, the providers, the media proxy) is mounted by the
+# profile's own composition: mounting those rows here too would double-register
+# them on a profile that already carries them, and the loader refuses a
+# duplicate id. Deploying onto a profile without the media stack should add
+# those rows here instead — with a `disabled:` guard of the shape
+#
+#   disabled: !!js "[...ctx.loader.entries()].some((e) => e.options.name === '<pkg>' && e.options.id !== '<this id>' && !e.disabled)"
+#
+# so an existing mount keeps owning the capability.
+- insert:
+    - id: roubaai-settings
+      name: '@roubaai/settings'
+      inject: [webServer, settings]

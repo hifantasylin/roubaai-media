@@ -1,0 +1,16 @@
+{
+  // @roubaai/media carries both faces in one package: the host half
+  // (generate_* tools, the ctx.media services) and the browser half
+  // (src/client keyed job_output toolview). One client-preset project compiles
+  // src/ as a whole — JSX for the toolview, node types for the tools.
+  "extends": "../../tsconfig.base.client.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types",
+    // node only: the host half reads process.env (tunnel.ts reads DSH_MEDIA_*
+    // / FFMPEG_BIN). The browser half never touches process.env. jsx and the
+    // DOM library come from tsconfig.base.client.json.
+    "types": ["node"]
+  },
+  "include": ["src"]
+}
