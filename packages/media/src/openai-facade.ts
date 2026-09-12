@@ -28,15 +28,19 @@
  * @module @roubaai/media/openai-facade
  */
 
+import { createReadStream } from 'node:fs'
+import { stat } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 // Type-only: pulls the webServer Context augmentation (ctx.webServer).
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { MEDIA_ROUTE_PREFIX, cachedMediaBytes, downloadToCache } from './media-cache.ts'
+import { MEDIA_ROUTE_PREFIX, cachedMediaBytes, cachedMediaFile, downloadToCache } from './media-cache.ts'
 import { landMediaAsset } from './asset-landing.ts'
 import { appendMediaCost } from './cost-ledger.ts'
+import { fileFields, parseMultipart, textField } from './multipart.ts'
 import { MEDIA_SETTINGS_NAMESPACE, readActiveAdapter, readActiveMediaProvider } from './settings-lookup.ts'
-import type { ImageGenerateInput, ImageGenerationResult } from './provider.ts'
+import type { ImageGenerateInput, ImageGenerationResult, VideoGenerateInput, VideoProvider, VideoTaskHandle } from './provider.ts'
 
 /** Route prefix on the host webserver, under the media routes. */
 export const OPENAI_FACADE_PREFIX = `${MEDIA_ROUTE_PREFIX}/openai`
@@ -48,6 +52,36 @@ const MAX_BODY_BYTES = 1024 * 1024
 const IMAGE_GENERATION_PATHS = new Set(['/v1/images/generations', '/images/generations'])
 /** Reference-edit endpoints (multipart body; not implemented yet). */
 const IMAGE_EDIT_PATHS = new Set(['/v1/images/edits', '/images/edits'])
+/** Video task endpoints: create, then poll, then fetch content. */
+const VIDEO_CREATE_PATHS = new Set(['/v1/videos', '/videos'])
+const VIDEO_TASK_PATH = /^\/(?:v1\/)?videos\/([^/]+)$/
+const VIDEO_CONTENT_PATH = /^\/(?:v1\/)?videos\/([^/]+)\/content$/
+
+/** How long a submitted video task stays addressable, in milliseconds. */
+const VIDEO_TASK_TTL_MS = 2 * 60 * 60 * 1000
+
+/** One submitted video task, as the facade tracks it between polls. */
+interface VideoTaskEntry {
+  readonly handle: VideoTaskHandle
+  readonly provider: VideoProvider
+  readonly model: string
+  readonly duration: number
+  readonly resolution: string
+  readonly createdAt: number
+  /** Set once the task finished and its bytes were cached, so later polls are free. */
+  completed?: { url: string; sourceUrl: string; assetPath?: string; ledger: boolean }
+}
+
+/** Live video tasks by the id the canvas polls with. */
+const videoTasks = new Map<string, VideoTaskEntry>()
+
+function pruneVideoTasks(): void {
+  const cutoff = Date.now() - VIDEO_TASK_TTL_MS
+  for (const [id, entry] of videoTasks) {
+    if (entry.createdAt < cutoff) videoTasks.delete(id)
+  }
+}
+
 
 /** Header a caller uses to name the workspace the run should be billed to. */
 export const WORKSPACE_HEADER = 'x-roubaai-workspace'
@@ -109,13 +143,13 @@ function sameOrigin(req: IncomingMessage): boolean {
   }
 }
 
-/** Read the whole request body, refusing anything past the byte cap. */
-async function readBody(req: IncomingMessage): Promise<string | undefined> {
-  return await new Promise<string | undefined>((resolve) => {
+/** Read the whole request body as bytes, refusing anything past the byte cap. */
+async function readBodyBuffer(req: IncomingMessage): Promise<Buffer | undefined> {
+  return await new Promise<Buffer | undefined>((resolve) => {
     const chunks: Buffer[] = []
     let size = 0
     let settled = false
-    const finish = (value: string | undefined): void => {
+    const finish = (value: Buffer | undefined): void => {
       if (settled) return
       settled = true
       resolve(value)
@@ -128,9 +162,15 @@ async function readBody(req: IncomingMessage): Promise<string | undefined> {
       }
       chunks.push(chunk)
     })
-    req.on('end', () => finish(Buffer.concat(chunks).toString('utf8')))
+    req.on('end', () => finish(Buffer.concat(chunks)))
     req.on('error', () => finish(undefined))
   })
+}
+
+/** Read the body as text (a JSON request); multipart readers use the byte form. */
+async function readBody(req: IncomingMessage): Promise<string | undefined> {
+  const buffer = await readBodyBuffer(req)
+  return buffer?.toString('utf8')
 }
 
 function stringField(body: Record<string, unknown>, key: string): string | undefined {
@@ -215,16 +255,33 @@ export async function handleOpenAiRequest(
   res: ServerResponse,
   url: URL,
 ): Promise<void> {
-  if (req.method !== 'POST') {
-    sendJson(res, 405, { error: { message: 'method not allowed', type: 'invalid_request_error' } })
-    return
-  }
   if (!sameOrigin(req)) {
     sendJson(res, 403, { error: { message: 'cross-origin request refused', type: 'invalid_request_error' } })
     return
   }
 
   const path = url.pathname.slice(OPENAI_FACADE_PREFIX.length) || '/'
+  // Video is a task protocol: create, poll, fetch. Each verb is checked where it
+  // belongs, because a poll is a GET while every other endpoint is a POST.
+  if (VIDEO_CREATE_PATHS.has(path)) {
+    await createVideoTask(ctx, req, res)
+    return
+  }
+  const contentMatch = VIDEO_CONTENT_PATH.exec(path)
+  if (contentMatch !== null) {
+    await serveVideoContent(res, contentMatch[1] ?? '')
+    return
+  }
+  const taskMatch = VIDEO_TASK_PATH.exec(path)
+  if (taskMatch !== null) {
+    await pollVideoTask(ctx, req, res, taskMatch[1] ?? '')
+    return
+  }
+
+  if (req.method !== 'POST') {
+    sendJson(res, 405, { error: { message: 'method not allowed', type: 'invalid_request_error' } })
+    return
+  }
   if (IMAGE_EDIT_PATHS.has(path)) {
     sendJson(res, 501, {
       error: {
@@ -314,53 +371,21 @@ export async function handleOpenAiRequest(
     return
   }
 
-  // Land the bytes and record the run, the same way `generate_image` does. Both
-  // steps are best-effort on purpose: the image exists and its URL is in hand, so
-  // a filesystem or ledger problem must not turn a finished generation into a
-  // failure the caller would retry — it is reported in the response instead.
-  const workspace = headerValue(req, WORKSPACE_HEADER) ?? process.cwd()
-  const project = headerValue(req, PROJECT_HEADER) ?? DEFAULT_PROJECT
-  const name = headerValue(req, NAME_HEADER) ?? timestampName()
+  // Land the bytes and record the run, the same way `generate_image` does.
   const tier = input.resolution ?? '1K'
-  let landed: string | undefined
-  let ledger = false
-  const bytes = remote === undefined ? undefined : await cachedMediaBytes(remote)
-  if (bytes !== undefined) {
-    try {
-      const asset = await landMediaAsset({
-        workspace,
-        project,
-        dir: headerValue(req, DIR_HEADER) ?? DEFAULT_DIR,
-        name,
-        ext: 'png',
-        bytes,
-        category: headerValue(req, CATEGORY_HEADER) ?? DEFAULT_CATEGORY,
-        reference: remote ?? url_,
-        url: remote,
-        displayUrl: remote,
-      })
-      landed = asset.path
-    } catch (error) {
-      ctx.logger.warn(`roubaai-media: canvas asset landing failed: ${error instanceof Error ? error.message : String(error)}`)
-    }
-  }
-  try {
-    const model = result.providerMeta.model
-    await appendMediaCost(workspace, {
-      ts: Date.now(),
-      tool: 'image',
-      model,
-      project,
-      label: name,
-      spec: tier,
-      costUsd: provider.estimateCostUsd(model, tier) ?? 0,
-      source: 'estimated',
-      taskId: result.providerMeta.provider,
-    })
-    ledger = true
-  } catch (error) {
-    ctx.logger.warn(`roubaai-media: canvas cost ledger append failed: ${error instanceof Error ? error.message : String(error)}`)
-  }
+  const recorded = await recordCanvasRun({
+    ctx,
+    req,
+    remoteUrl: remote,
+    ext: 'png',
+    defaultDir: DEFAULT_DIR,
+    defaultCategory: DEFAULT_CATEGORY,
+    tool: 'image',
+    model: result.providerMeta.model,
+    providerName: result.providerMeta.provider,
+    spec: tier,
+    costUsd: provider.estimateCostUsd(result.providerMeta.model, tier) ?? 0,
+  })
 
   sendJson(res, 200, {
     created: Math.floor(Date.now() / 1000),
@@ -370,12 +395,268 @@ export async function handleOpenAiRequest(
       model: result.providerMeta.model,
       tier,
       ...(result.run?.size === undefined ? {} : { size: result.run.size }),
-      ledger,
-      landed: landed !== undefined,
-      ...(landed === undefined ? {} : { assetPath: landed }),
+      ledger: recorded.ledger,
+      landed: recorded.landed !== undefined,
+      ...(recorded.landed === undefined ? {} : { assetPath: recorded.landed }),
       ...(ignored.length === 0 ? {} : { ignored }),
     },
   })
+}
+
+/** Video defaults: the shot folder and category a generated clip belongs to. */
+const DEFAULT_VIDEO_DIR = '05_视频片段'
+const DEFAULT_VIDEO_CATEGORY = 'video'
+
+/**
+ * Land one finished run's bytes and record its cost.
+ *
+ * Both steps are best-effort: the media exists and its URL is in hand, so a
+ * filesystem or ledger problem is reported in the response instead of turning a
+ * finished generation into one the caller would retry.
+ * @param options - the run's identity, its bytes' source URL, and its billing facts.
+ * @returns the landed path when one exists, and whether the ledger took the entry.
+ */
+async function recordCanvasRun(options: {
+  ctx: Context
+  req: IncomingMessage
+  remoteUrl: string | undefined
+  ext: string
+  defaultDir: string
+  defaultCategory: string
+  tool: 'image' | 'video'
+  model: string
+  providerName: string
+  spec: string
+  costUsd: number
+}): Promise<{ landed?: string; ledger: boolean }> {
+  const workspace = headerValue(options.req, WORKSPACE_HEADER) ?? process.cwd()
+  const project = headerValue(options.req, PROJECT_HEADER) ?? DEFAULT_PROJECT
+  const name = headerValue(options.req, NAME_HEADER) ?? timestampName()
+  let landed: string | undefined
+  const bytes = options.remoteUrl === undefined ? undefined : await cachedMediaBytes(options.remoteUrl)
+  if (bytes !== undefined && options.remoteUrl !== undefined) {
+    try {
+      const asset = await landMediaAsset({
+        workspace,
+        project,
+        dir: headerValue(options.req, DIR_HEADER) ?? options.defaultDir,
+        name,
+        ext: options.ext,
+        bytes,
+        category: headerValue(options.req, CATEGORY_HEADER) ?? options.defaultCategory,
+        reference: options.remoteUrl,
+        url: options.remoteUrl,
+        displayUrl: options.remoteUrl,
+      })
+      landed = asset.path
+    } catch (error) {
+      options.ctx.logger.warn(`roubaai-media: canvas asset landing failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  let ledger = false
+  try {
+    await appendMediaCost(workspace, {
+      ts: Date.now(),
+      tool: options.tool,
+      model: options.model,
+      project,
+      label: name,
+      spec: options.spec,
+      costUsd: options.costUsd,
+      source: 'estimated',
+      taskId: options.providerName,
+    })
+    ledger = true
+  } catch (error) {
+    options.ctx.logger.warn(`roubaai-media: canvas cost ledger append failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  return { ...(landed === undefined ? {} : { landed }), ledger }
+}
+
+/** The body one completed video poll answers with, in every spelling the client reads. */
+function completedVideoBody(id: string, completed: NonNullable<VideoTaskEntry['completed']>): Record<string, unknown> {
+  return {
+    id,
+    status: 'completed',
+    url: completed.url,
+    video_url: completed.url,
+    result_url: completed.url,
+    roubaai: {
+      ledger: completed.ledger,
+      landed: completed.assetPath !== undefined,
+      ...(completed.assetPath === undefined ? {} : { assetPath: completed.assetPath }),
+    },
+  }
+}
+
+/** Submit one video task from the canvas's multipart body. */
+async function createVideoTask(ctx: Context, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== 'POST') {
+    sendJson(res, 405, { error: { message: 'method not allowed', type: 'invalid_request_error' } })
+    return
+  }
+  const body = await readBodyBuffer(req)
+  if (body === undefined) {
+    sendJson(res, 400, { error: { message: 'request body missing or larger than 1 MiB', type: 'invalid_request_error' } })
+    return
+  }
+  const parts = parseMultipart(req.headers['content-type'], body)
+  const prompt = textField(parts, 'prompt')
+  if (prompt === undefined) {
+    sendJson(res, 400, {
+      error: { message: 'expected a multipart/form-data body with a non-empty prompt field', type: 'invalid_request_error' },
+    })
+    return
+  }
+  // Reference images have to reach the provider as URLs it can fetch; a
+  // same-origin signed route is not one. Until they are republished through the
+  // public-reference tunnel, say so instead of failing inside the provider.
+  const references = [...fileFields(parts, 'image'), ...fileFields(parts, 'images')]
+  if (references.length > 0) {
+    sendJson(res, 501, {
+      error: {
+        message: 'reference images for video are not served yet: they must be republished through the public-reference tunnel first',
+        type: 'unsupported_error',
+      },
+    })
+    return
+  }
+
+  const adapter = readActiveAdapter(ctx, 'video')
+  let provider: VideoProvider
+  try {
+    provider = adapter === undefined ? ctx.media.video() : ctx.media.video(adapter)
+  } catch (error) {
+    sendJson(res, 503, {
+      error: {
+        message: `no video provider is available: ${error instanceof Error ? error.message : String(error)}`,
+        type: 'service_unavailable_error',
+      },
+    })
+    return
+  }
+
+  const seconds = Number(textField(parts, 'seconds') ?? '')
+  const size = textField(parts, 'size')
+  // `size` carries pixels in the OpenAI video shape and a ratio elsewhere; only a
+  // ratio can travel as `size`, so pixels are passed through as dimensions.
+  const pixels = size === undefined ? undefined : /^(\d+)\s*[x×]\s*(\d+)$/i.exec(size)
+  const model = textField(parts, 'model')
+  const resolution = textField(parts, 'resolution_name')
+  const input: VideoGenerateInput = {
+    prompt,
+    ...(model === undefined ? {} : { model }),
+    duration: Number.isFinite(seconds) && seconds > 0 ? seconds : 5,
+    ...(resolution === undefined ? {} : { resolution }),
+    ...(size === undefined || pixels !== null ? {} : { size }),
+    ...(pixels === null || pixels === undefined ? {} : { extra: { width: Number(pixels[1]), height: Number(pixels[2]) } }),
+    generateAudio: textField(parts, 'generate_audio') === 'true',
+    watermark: textField(parts, 'watermark') === 'true',
+  }
+
+  try {
+    pruneVideoTasks()
+    const handle = await provider.submit(input, AbortSignal.timeout(120_000))
+    const id = randomUUID()
+    videoTasks.set(id, {
+      handle,
+      provider,
+      model: input.model ?? provider.defaultModel,
+      duration: input.duration ?? 5,
+      resolution: input.resolution ?? '720p',
+      createdAt: Date.now(),
+    })
+    sendJson(res, 200, { id, status: 'pending' })
+  } catch (error) {
+    sendJson(res, 502, {
+      error: { message: `video submission failed: ${error instanceof Error ? error.message : String(error)}`, type: 'upstream_error' },
+    })
+  }
+}
+
+/** Answer one poll, finishing (and caching) the task the first time it succeeds. */
+async function pollVideoTask(ctx: Context, req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
+  const entry = videoTasks.get(id)
+  if (entry === undefined) {
+    sendJson(res, 404, { error: { message: `unknown video task ${id}`, type: 'invalid_request_error' } })
+    return
+  }
+  if (entry.completed !== undefined) {
+    sendJson(res, 200, completedVideoBody(id, entry.completed))
+    return
+  }
+  let poll
+  try {
+    poll = await entry.handle.poll()
+  } catch (error) {
+    sendJson(res, 502, {
+      error: { message: `video poll failed: ${error instanceof Error ? error.message : String(error)}`, type: 'upstream_error' },
+    })
+    return
+  }
+  if (poll.status === 'running') {
+    sendJson(res, 200, { id, status: 'pending', ...(poll.progress === undefined ? {} : { progress: poll.progress }) })
+    return
+  }
+  if (poll.status === 'failed') {
+    sendJson(res, 200, { id, status: 'failed', error: { message: poll.errorMsg ?? 'video generation failed' } })
+    return
+  }
+  try {
+    const result = await entry.provider.finalize(entry.handle)
+    const sourceUrl = result.mediaRef.url
+    const stable = await downloadToCache({
+      url: sourceUrl,
+      mediaType: 'video/mp4',
+      fallbackExt: 'mp4',
+      log: (message) => ctx.logger.warn(`roubaai-media: ${message}`),
+    })
+    const recorded = await recordCanvasRun({
+      ctx,
+      req,
+      remoteUrl: sourceUrl,
+      ext: 'mp4',
+      defaultDir: DEFAULT_VIDEO_DIR,
+      defaultCategory: DEFAULT_VIDEO_CATEGORY,
+      tool: 'video',
+      model: result.providerMeta.model,
+      providerName: result.providerMeta.provider,
+      spec: `${entry.duration}s ${entry.resolution}`,
+      costUsd: entry.provider.estimateCostUsd(result.providerMeta.model, entry.duration, entry.resolution) ?? 0,
+    })
+    entry.completed = {
+      url: stable ?? sourceUrl,
+      sourceUrl,
+      ...(recorded.landed === undefined ? {} : { assetPath: recorded.landed }),
+      ledger: recorded.ledger,
+    }
+    sendJson(res, 200, completedVideoBody(id, entry.completed))
+  } catch (error) {
+    sendJson(res, 502, {
+      error: { message: `video finalize failed: ${error instanceof Error ? error.message : String(error)}`, type: 'upstream_error' },
+    })
+  }
+}
+
+/** Stream the cached copy of a finished video, for the client's content fallback. */
+async function serveVideoContent(res: ServerResponse, id: string): Promise<void> {
+  const entry = videoTasks.get(id)
+  if (entry?.completed === undefined) {
+    sendJson(res, 404, { error: { message: `unknown or unfinished video task ${id}`, type: 'invalid_request_error' } })
+    return
+  }
+  const file = cachedMediaFile(entry.completed.sourceUrl)
+  if (file === undefined) {
+    sendJson(res, 409, { error: { message: 'the finished video has no cached copy to stream', type: 'invalid_request_error' } })
+    return
+  }
+  try {
+    const info = await stat(file)
+    res.writeHead(200, { 'content-type': 'video/mp4', 'content-length': String(info.size), 'accept-ranges': 'none' })
+    createReadStream(file).pipe(res)
+  } catch {
+    sendJson(res, 404, { error: { message: 'the cached video file is gone', type: 'invalid_request_error' } })
+  }
 }
 
 /**
