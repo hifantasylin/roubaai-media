@@ -13,7 +13,7 @@ class StubImageProvider extends ImageProvider {
   readonly defaultModel = 'stub-image-v1'
   inputs: ImageGenerateInput[] = []
   resultUrl: string | undefined = 'https://cdn.example/generated.png'
-  localUrl: string | undefined
+  localUrl: string | undefined = 'http://127.0.0.1:3080/api/roubaai-media/media?id=1&exp=2&sig=3'
   async generate(input: ImageGenerateInput): Promise<ImageGenerationResult> {
     this.inputs.push(input)
     return {
@@ -107,7 +107,7 @@ describe('openai facade: image generations', () => {
     const { status, json } = await call(ctx, { body: { prompt: '一只狐狸', size: '1344x768', quality: 'high' } })
 
     expect(status).toBe(200)
-    expect((json['data'] as Array<{ url: string }>)[0]?.url).toBe('https://cdn.example/generated.png')
+    expect((json['data'] as Array<{ url: string }>)[0]?.url).toBe('http://127.0.0.1:3080/api/roubaai-media/media?id=1&exp=2&sig=3')
     expect(json['roubaai']).toMatchObject({ provider: 'stub-image', model: 'stub-image-v1', size: '2048x1152', ledger: false, landed: false })
     expect(provider.inputs[0]).toMatchObject({ prompt: '一只狐狸', width: 1344, height: 768, quality: 'high' })
   })
@@ -118,11 +118,15 @@ describe('openai facade: image generations', () => {
     expect(status).toBe(200)
   })
 
-  it('prefers the locally cached stream URL over the provider CDN URL', async () => {
+  it('keeps the provider URL when the bytes cannot be cached locally', async () => {
     const { ctx, provider } = await boot()
-    provider.localUrl = 'http://127.0.0.1:3080/api/roubaai-media/media?id=1&exp=2&sig=3'
-    const { json } = await call(ctx, { body: { prompt: 'x' } })
-    expect((json['data'] as Array<{ url: string }>)[0]?.url).toContain('/api/roubaai-media/media')
+    // Port 9 refuses instantly, so the cache attempt fails without depending on
+    // the network: the run still answers, with the URL it already holds.
+    provider.localUrl = undefined
+    provider.resultUrl = 'http://127.0.0.1:9/generated.png'
+    const { status, json } = await call(ctx, { body: { prompt: 'x' } })
+    expect(status).toBe(200)
+    expect((json['data'] as Array<{ url: string }>)[0]?.url).toBe('http://127.0.0.1:9/generated.png')
   })
 
   it('refuses a cross-origin browser request', async () => {
@@ -157,6 +161,7 @@ describe('openai facade: image generations', () => {
   it('reports an upstream failure as 502 instead of a 200 with no image', async () => {
     const { ctx, provider } = await boot()
     provider.resultUrl = undefined
+    provider.localUrl = undefined
     const { status } = await call(ctx, { body: { prompt: 'x' } })
     expect(status).toBe(502)
   })

@@ -30,7 +30,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 // Type-only: pulls the webServer Context augmentation (ctx.webServer).
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { MEDIA_ROUTE_PREFIX } from './media-cache.ts'
+import { MEDIA_ROUTE_PREFIX, downloadToCache } from './media-cache.ts'
 import { MEDIA_SETTINGS_NAMESPACE, readActiveAdapter, readActiveMediaProvider } from './settings-lookup.ts'
 import type { ImageGenerateInput, ImageGenerationResult } from './provider.ts'
 
@@ -165,6 +165,15 @@ export function imageUrlOf(result: ImageGenerationResult): string | undefined {
 }
 
 /**
+ * The provider's own URL, ignoring any local copy it already carries.
+ * @param result - the provider's result.
+ * @returns the remote URL, or undefined when the provider stated none.
+ */
+function remoteUrlOf(result: ImageGenerationResult): string | undefined {
+  return result.resultUrl ?? result.mediaRef?.url
+}
+
+/**
  * Answer one OpenAI-shaped request.
  * @param ctx - the plugin context (the media registry is read off it).
  * @param req - the incoming request.
@@ -257,7 +266,18 @@ export async function handleOpenAiRequest(
     return
   }
 
-  const url_ = imageUrlOf(result)
+  // Cache the provider's 24h URL on first sight, so the canvas stores a URL that
+  // outlives the CDN link. A failed download keeps the CDN URL the run already
+  // has: the image exists, and saying so beats reporting a caching problem as a
+  // failed generation.
+  const remote = remoteUrlOf(result)
+  const stable = result.mediaRef?.localUrl ?? (remote === undefined ? undefined : await downloadToCache({
+    url: remote,
+    mediaType: result.mediaType,
+    fallbackExt: 'png',
+    log: (message) => ctx.logger.warn(`roubaai-media: ${message}`),
+  }))
+  const url_ = stable ?? imageUrlOf(result)
   if (url_ === undefined) {
     sendJson(res, 502, {
       error: { message: 'the provider returned no image URL', type: 'upstream_error' },
@@ -273,9 +293,9 @@ export async function handleOpenAiRequest(
       model: result.providerMeta.model,
       ...(input.resolution === undefined ? {} : { tier: input.resolution }),
       ...(result.run?.size === undefined ? {} : { size: result.run.size }),
-      // Stated rather than implied: until the ledger and asset pipeline are
-      // wired to this path, a canvas run leaves neither a cost record nor a
-      // file under `.assets`.
+      // Stated rather than implied: until the asset pipeline is wired to this
+      // path, a canvas run leaves no file under `.assets`. The URL it answers
+      // with is already cached locally, so it outlives the provider's CDN link.
       ledger: false,
       landed: false,
       ...(ignored.length === 0 ? {} : { ignored }),

@@ -15,6 +15,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { MediaRuntimeLocal } from './media-local.ts'
 import { MediaUrlNormalizer } from './tunnel.ts'
 import { registerWebRoutes } from './media-cache.ts'
+import { registerAssetRoutes } from './asset-routes.ts'
 import { registerOpenAiRoutes } from './openai-facade.ts'
 import { registerGenerateImage } from './tools/generate-image.ts'
 import { registerGenerateVideo } from './tools/generate-video.ts'
@@ -56,6 +57,7 @@ export type {
 export type { MediaRuntime } from './service.ts'
 export { NoProviderError, MediaRuntimeLocal } from './media-local.ts'
 export { OPENAI_FACADE_PREFIX, registerOpenAiRoutes, mapImageRequest } from './openai-facade.ts'
+export { ASSETS_ROUTE_PREFIX, registerAssetRoutes, resolveAssetPath } from './asset-routes.ts'
 
 export const name = 'roubaai-media'
 export const inject = ['tools', 'jobs', 'attachments', 'webServer']
@@ -77,6 +79,9 @@ export function apply(ctx: Context): void {
   // requests reach the same providers as the agent tools while the key stays in
   // this process. See openai-facade.ts for what it does not serve yet.
   ctx.effect(() => registerOpenAiRoutes(ctx), 'roubaai-media: openai facade routes')
+  // Read-only listing/serving of `<root>/.assets/**`, so the canvas can display
+  // an asset (image or video) by URL instead of importing a second copy.
+  ctx.effect(() => registerAssetRoutes(ctx), 'roubaai-media: asset tree routes')
   registerGenerateImage(ctx)
   registerGenerateVideo(ctx)
   registerGenerateMusic(ctx)
