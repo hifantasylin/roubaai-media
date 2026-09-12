@@ -1,0 +1,48 @@
+{
+  "name": "@roubaai/canvas",
+  "description": "Host half for the canvas workbench: serves the built infinite-canvas frontend and its node plugin on the harness origin",
+  "version": "0.1.2-rc.3",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hifantasylin/roubaai-media.git",
+    "directory": "packages/canvas"
+  },
+  "type": "module",
+  "main": "lib/types/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/types/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/types/**",
+    "assets/**",
+    "cordis.patch.yml"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": { "optional": true }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-host-webserver": "0.1.5-rc.1"
+  }
+}

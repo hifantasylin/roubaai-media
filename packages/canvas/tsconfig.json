@@ -1,0 +1,11 @@
+{
+  // Host half only: the canvas frontend is a built artifact this package serves,
+  // not code it compiles, so there is no client preset and no JSX here.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types",
+    "types": ["node"]
+  },
+  "include": ["src"]
+}
