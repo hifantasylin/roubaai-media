@@ -29,9 +29,10 @@
  */
 
 import { createReadStream } from 'node:fs'
-import { stat } from 'node:fs/promises'
+import { mkdir, stat, writeFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { randomUUID } from 'node:crypto'
+import { extname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 // Type-only: pulls the webServer Context augmentation (ctx.webServer).
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -40,7 +41,7 @@ import { landMediaAsset } from './asset-landing.ts'
 import { appendMediaCost } from './cost-ledger.ts'
 import { fileFields, parseMultipart, textField } from './multipart.ts'
 import { MEDIA_SETTINGS_NAMESPACE, readActiveAdapter, readActiveMediaProvider } from './settings-lookup.ts'
-import type { ImageGenerateInput, ImageGenerationResult, VideoGenerateInput, VideoProvider, VideoTaskHandle } from './provider.ts'
+import type { ImageGenerateInput, ImageGenerationResult, ImageProvider, VideoGenerateInput, VideoProvider, VideoTaskHandle } from './provider.ts'
 
 /** Route prefix on the host webserver, under the media routes. */
 export const OPENAI_FACADE_PREFIX = `${MEDIA_ROUTE_PREFIX}/openai`
@@ -283,12 +284,7 @@ export async function handleOpenAiRequest(
     return
   }
   if (IMAGE_EDIT_PATHS.has(path)) {
-    sendJson(res, 501, {
-      error: {
-        message: 'image edits are not served yet: the multipart /v1/images/edits body is unimplemented',
-        type: 'unsupported_error',
-      },
-    })
+    await createImageEdit(ctx, req, res)
     return
   }
   if (!IMAGE_GENERATION_PATHS.has(path)) {
@@ -352,56 +348,210 @@ export async function handleOpenAiRequest(
     return
   }
 
-  // Cache the provider's 24h URL on first sight, so the canvas stores a URL that
-  // outlives the CDN link. A failed download keeps the CDN URL the run already
-  // has: the image exists, and saying so beats reporting a caching problem as a
-  // failed generation.
-  const remote = remoteUrlOf(result)
-  const stable = result.mediaRef?.localUrl ?? (remote === undefined ? undefined : await downloadToCache({
-    url: remote,
-    mediaType: result.mediaType,
-    fallbackExt: 'png',
-    log: (message) => ctx.logger.warn(`roubaai-media: ${message}`),
-  }))
-  const url_ = stable ?? imageUrlOf(result)
-  if (url_ === undefined) {
-    sendJson(res, 502, {
-      error: { message: 'the provider returned no image URL', type: 'upstream_error' },
-    })
-    return
-  }
-
-  // Land the bytes and record the run, the same way `generate_image` does.
-  const tier = input.resolution ?? '1K'
-  const recorded = await recordCanvasRun({
+  await finishImageRequest({
     ctx,
     req,
+    res,
+    provider,
+    result,
+    tier: input.resolution ?? '1K',
+    ignored,
+  })
+}
+
+/**
+ * Cache one finished image, land it, record it, and answer the caller.
+ *
+ * Shared by text-to-image and reference edits: both end with bytes in hand and
+ * the same obligations (a URL that outlives the provider link, an asset on disk,
+ * a ledger row), so both must end here rather than in two near-identical tails.
+ */
+async function finishImageRequest(options: {
+  ctx: Context
+  req: IncomingMessage
+  res: ServerResponse
+  provider: ImageProvider
+  result: ImageGenerationResult
+  tier: string
+  ignored: readonly string[]
+}): Promise<void> {
+  const remote = remoteUrlOf(options.result)
+  const stable = options.result.mediaRef?.localUrl ?? (remote === undefined ? undefined : await downloadToCache({
+    url: remote,
+    mediaType: options.result.mediaType,
+    fallbackExt: 'png',
+    log: (message) => options.ctx.logger.warn(`roubaai-media: ${message}`),
+  }))
+  const url = stable ?? imageUrlOf(options.result)
+  if (url === undefined) {
+    sendJson(options.res, 502, { error: { message: 'the provider returned no image URL', type: 'upstream_error' } })
+    return
+  }
+  const recorded = await recordCanvasRun({
+    ctx: options.ctx,
+    req: options.req,
     remoteUrl: remote,
     ext: 'png',
     defaultDir: DEFAULT_DIR,
     defaultCategory: DEFAULT_CATEGORY,
     tool: 'image',
-    model: result.providerMeta.model,
-    providerName: result.providerMeta.provider,
-    spec: tier,
-    costUsd: provider.estimateCostUsd(result.providerMeta.model, tier) ?? 0,
+    model: options.result.providerMeta.model,
+    providerName: options.result.providerMeta.provider,
+    spec: options.tier,
+    costUsd: options.provider.estimateCostUsd(options.result.providerMeta.model, options.tier) ?? 0,
   })
-
-  sendJson(res, 200, {
+  sendJson(options.res, 200, {
     created: Math.floor(Date.now() / 1000),
-    data: [{ url: url_ }],
+    data: [{ url }],
     roubaai: {
-      provider: result.providerMeta.provider,
-      model: result.providerMeta.model,
-      tier,
-      ...(result.run?.size === undefined ? {} : { size: result.run.size }),
+      provider: options.result.providerMeta.provider,
+      model: options.result.providerMeta.model,
+      tier: options.tier,
+      ...(options.result.run?.size === undefined ? {} : { size: options.result.run.size }),
       ledger: recorded.ledger,
       landed: recorded.landed !== undefined,
       ...(recorded.landed === undefined ? {} : { assetPath: recorded.landed }),
-      ...(ignored.length === 0 ? {} : { ignored }),
+      ...(options.ignored.length === 0 ? {} : { ignored: [...options.ignored] }),
     },
   })
 }
+
+/** One reference edit: a multipart body carrying a prompt and the image(s) to edit. */
+async function createImageEdit(ctx: Context, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readBodyBuffer(req)
+  if (body === undefined) {
+    sendJson(res, 400, { error: { message: 'request body missing or larger than 1 MiB', type: 'invalid_request_error' } })
+    return
+  }
+  const parts = parseMultipart(req.headers['content-type'], body)
+  const prompt = textField(parts, 'prompt')
+  if (prompt === undefined) {
+    sendJson(res, 400, {
+      error: { message: 'expected a multipart/form-data body with a non-empty prompt field', type: 'invalid_request_error' },
+    })
+    return
+  }
+  const imageParts = [...fileFields(parts, 'image'), ...fileFields(parts, 'images')]
+  if (imageParts.length === 0) {
+    sendJson(res, 400, { error: { message: 'expected at least one image part to edit', type: 'invalid_request_error' } })
+    return
+  }
+  const workspace = headerValue(req, WORKSPACE_HEADER) ?? process.cwd()
+  const published = await publishReferences(ctx, imageParts, workspace)
+  if (published === undefined) {
+    sendJson(res, 501, {
+      error: {
+        message: 'reference media needs the public-reference tunnel, which is not available on this host',
+        type: 'unsupported_error',
+      },
+    })
+    return
+  }
+
+  const adapter = readActiveAdapter(ctx, 'image')
+  let provider: ImageProvider
+  try {
+    provider = adapter === undefined ? ctx.media.image() : ctx.media.image(adapter)
+  } catch (error) {
+    sendJson(res, 503, {
+      error: {
+        message: `no image provider is available: ${error instanceof Error ? error.message : String(error)}`,
+        type: 'service_unavailable_error',
+      },
+    })
+    return
+  }
+
+  const size = textField(parts, 'size')
+  const pixels = size === undefined ? undefined : /^(\d+)\s*[x×]\s*(\d+)$/i.exec(size)
+  const model = textField(parts, 'model')
+  const input: ImageGenerateInput = {
+    prompt,
+    refImages: published.map((reference) => reference.url),
+    ...(model === undefined ? {} : { model }),
+    ...(pixels === null || pixels === undefined ? {} : { width: Number(pixels[1]), height: Number(pixels[2]) }),
+  }
+  let result: ImageGenerationResult
+  try {
+    result = await provider.generate(input, AbortSignal.timeout(300_000))
+  } catch (error) {
+    sendJson(res, 502, {
+      error: { message: `image edit failed: ${error instanceof Error ? error.message : String(error)}`, type: 'upstream_error' },
+    })
+    return
+  }
+  await finishImageRequest({ ctx, req, res, provider, result, tier: input.resolution ?? '1K', ignored: [] })
+}
+
+/**
+ * Where a canvas upload is staged before it can be published.
+ *
+ * A reference the provider must fetch cannot be a same-origin URL: the provider
+ * is a third party. Written files land here, inside the workspace, because the
+ * reference tunnel serves `_local/...` from the workspace root and refuses
+ * anything outside it. The directory is deliberately NOT under `.assets`: these
+ * are transport, not assets, and the asset tree should keep showing only what a
+ * user decided to keep.
+ */
+const REFERENCE_DIR = '.roubaai-refs'
+
+const EXTENSION_OF_TYPE: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'video/mp4': 'mp4',
+  'video/webm': 'webm',
+  'video/quicktime': 'mov',
+  'audio/mpeg': 'mp3',
+  'audio/wav': 'wav',
+  'audio/mp4': 'm4a',
+}
+
+/** The staged file's extension: its own name first, its declared type second. */
+function referenceExtension(part: { filename?: string; contentType?: string }): string {
+  const fromName = part.filename === undefined ? '' : extname(part.filename).replace(/^\./, '').toLowerCase()
+  if (fromName !== '') return fromName
+  return (part.contentType === undefined ? undefined : EXTENSION_OF_TYPE[part.contentType]) ?? 'bin'
+}
+
+/** One published reference, kept with its staged path for diagnostics. */
+interface PublishedReference {
+  readonly url: string
+  readonly file: string
+}
+
+/**
+ * Stage uploaded reference parts inside the workspace and publish them as URLs a
+ * provider can fetch.
+ * @param ctx - the plugin context (its `mediaUrl` normalizer does the publishing).
+ * @param parts - the uploaded file parts, in body order.
+ * @param workspace - the workspace root the tunnel serves from.
+ * @returns the public URLs, or undefined when no normalizer is available.
+ */
+async function publishReferences(
+  ctx: Context,
+  parts: readonly MultipartFilePart[],
+  workspace: string,
+): Promise<PublishedReference[] | undefined> {
+  // Nothing to publish needs no tunnel: a reference-free run must work on a host
+  // that never started the normalizer.
+  if (parts.length === 0) return []
+  const normalizer = ctx.get('mediaUrl') as { normalize(ref: string, workspaceRoot?: string): Promise<string> } | undefined
+  if (normalizer === undefined || typeof normalizer.normalize !== 'function') return undefined
+  const directory = join(workspace, REFERENCE_DIR)
+  await mkdir(directory, { recursive: true })
+  const published: PublishedReference[] = []
+  for (const part of parts) {
+    const file = join(directory, `${randomUUID()}.${referenceExtension(part)}`)
+    await writeFile(file, part.data)
+    published.push({ url: await normalizer.normalize(file, workspace), file })
+  }
+  return published
+}
+
+/** A reference part as the multipart reader hands it over. */
+type MultipartFilePart = { readonly filename?: string; readonly contentType?: string; readonly data: Buffer }
 
 /** Video defaults: the shot folder and category a generated clip belongs to. */
 const DEFAULT_VIDEO_DIR = '05_视频片段'
@@ -508,14 +658,19 @@ async function createVideoTask(ctx: Context, req: IncomingMessage, res: ServerRe
     })
     return
   }
-  // Reference images have to reach the provider as URLs it can fetch; a
-  // same-origin signed route is not one. Until they are republished through the
-  // public-reference tunnel, say so instead of failing inside the provider.
-  const references = [...fileFields(parts, 'image'), ...fileFields(parts, 'images')]
-  if (references.length > 0) {
+  // A reference the provider must fetch has to become a public URL first: the
+  // provider is a third party, and a same-origin route is not reachable from it.
+  const workspace = headerValue(req, WORKSPACE_HEADER) ?? process.cwd()
+  const imageParts = [...fileFields(parts, 'image'), ...fileFields(parts, 'images')]
+  const videoParts = [...fileFields(parts, 'video'), ...fileFields(parts, 'videos')]
+  const audioParts = [...fileFields(parts, 'audio'), ...fileFields(parts, 'audios')]
+  const images = await publishReferences(ctx, imageParts, workspace)
+  const videos = await publishReferences(ctx, videoParts, workspace)
+  const audios = await publishReferences(ctx, audioParts, workspace)
+  if (images === undefined || videos === undefined || audios === undefined) {
     sendJson(res, 501, {
       error: {
-        message: 'reference images for video are not served yet: they must be republished through the public-reference tunnel first',
+        message: 'reference media needs the public-reference tunnel, which is not available on this host',
         type: 'unsupported_error',
       },
     })
@@ -550,6 +705,9 @@ async function createVideoTask(ctx: Context, req: IncomingMessage, res: ServerRe
     ...(resolution === undefined ? {} : { resolution }),
     ...(size === undefined || pixels !== null ? {} : { size }),
     ...(pixels === null || pixels === undefined ? {} : { extra: { width: Number(pixels[1]), height: Number(pixels[2]) } }),
+    ...(images.length === 0 ? {} : { imageUrls: images.map((reference) => reference.url) }),
+    ...(videos.length === 0 ? {} : { videoUrls: videos.map((reference) => reference.url) }),
+    ...(audios.length === 0 ? {} : { audioUrls: audios.map((reference) => reference.url) }),
     generateAudio: textField(parts, 'generate_audio') === 'true',
     watermark: textField(parts, 'watermark') === 'true',
   }

@@ -78,9 +78,17 @@ function fakeResponse() {
   }
 }
 
-async function boot(): Promise<{ ctx: Context; provider: StubImageProvider }> {
+async function boot(options: { normalizer?: boolean } = {}): Promise<{ ctx: Context; provider: StubImageProvider }> {
   const ctx = new Context()
   new MediaRuntimeLocal(ctx)
+  if (options.normalizer === true) {
+    // Stands in for the reference tunnel (a real one starts cloudflared).
+    ctx.provide('mediaUrl', {
+      async normalize(file: string) {
+        return `https://tunnel.example/${file.split(/[\\/]/).pop() ?? 'ref'}`
+      },
+    })
+  }
   const provider = new StubImageProvider()
   ctx.media.registerImageProvider(provider)
   return { ctx, provider }
@@ -162,11 +170,12 @@ describe('openai facade: image generations', () => {
     expect(status).toBe(405)
   })
 
-  it('states that the multipart edit endpoint is unimplemented rather than answering 404', async () => {
+  it('answers 400 for an edit body that carries no image to edit', async () => {
     const { ctx } = await boot()
-    const { status, json } = await call(ctx, { path: `${OPENAI_FACADE_PREFIX}/v1/images/edits`, body: { prompt: 'x' } })
-    expect(status).toBe(501)
-    expect((json['error'] as { type: string }).type).toBe('unsupported_error')
+    const { status } = await call(ctx, { path: `${OPENAI_FACADE_PREFIX}/v1/images/edits`, body: { prompt: 'x' } })
+    // A JSON body is not multipart, so it has no parts and no image: refused, and
+    // never answered with the old "unimplemented" 501 — edits are served now.
+    expect(status).toBe(400)
   })
 
   it('requires a non-empty prompt', async () => {
@@ -230,6 +239,72 @@ describe('openai facade: landing and ledger', () => {
     const { status, json } = await call(ctx, { body: { prompt: 'x' } })
     expect(status).toBe(200)
     expect((json['roubaai'] as Record<string, unknown>)['landed']).toBe(false)
+  })
+})
+
+describe('openai facade: reference edits', () => {
+  /** Build the multipart body the canvas posts to `/v1/images/edits`. */
+  function editBody(fields: Record<string, string>, files: Array<{ name: string; filename: string; data: Buffer }>) {
+    const boundary = '----roubaai-edit'
+    const chunks: Buffer[] = []
+    for (const [name, value] of Object.entries(fields)) {
+      chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`, 'utf8'))
+    }
+    for (const file of files) {
+      chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${file.name}"; filename="${file.filename}"\r\nContent-Type: image/png\r\n\r\n`, 'utf8'))
+      chunks.push(file.data)
+      chunks.push(Buffer.from('\r\n', 'utf8'))
+    }
+    chunks.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'))
+    return { body: Buffer.concat(chunks), contentType: `multipart/form-data; boundary=${boundary}` }
+  }
+
+  it('publishes the edited reference and answers with the finished image', async () => {
+    const { ctx, provider } = await boot({ normalizer: true })
+    const { body, contentType } = editBody({ prompt: '换成夜晚' }, [{ name: 'image[]', filename: 'scene.png', data: Buffer.from([9, 8, 7]) }])
+    // The call helper stringifies a JSON body; this one needs bytes, so drive the
+    // request directly with a binary payload.
+    const request = {
+      method: 'POST',
+      headers: { 'content-type': contentType, 'x-roubaai-workspace': scratch },
+      on(event: string, listener: (arg?: unknown) => void) {
+        if (event === 'data') listener(body)
+        if (event === 'end') setImmediate(() => listener())
+        return this
+      },
+    }
+    const res = { status: 0, body: '', writeHead(status: number) { this.status = status; return this }, end(chunk?: string) { this.body = chunk ?? ''; return this } }
+    await handleOpenAiRequest(
+      ctx,
+      request as unknown as IncomingMessage,
+      res as unknown as ServerResponse,
+      new URL(`${OPENAI_FACADE_PREFIX}/v1/images/edits`, 'http://127.0.0.1:3080'),
+    )
+    expect(res.status).toBe(200)
+    expect(provider.inputs[0]?.prompt).toBe('换成夜晚')
+    expect(provider.inputs[0]?.refImages?.[0]).toMatch(/^https:\/\/tunnel\.example\/[0-9a-f-]+\.png$/)
+  })
+
+  it('refuses an edit without an image part', async () => {
+    const { ctx } = await boot({ normalizer: true })
+    const { body, contentType } = editBody({ prompt: 'x' }, [])
+    const request = {
+      method: 'POST',
+      headers: { 'content-type': contentType, 'x-roubaai-workspace': scratch },
+      on(event: string, listener: (arg?: unknown) => void) {
+        if (event === 'data') listener(body)
+        if (event === 'end') setImmediate(() => listener())
+        return this
+      },
+    }
+    const res = { status: 0, writeHead(status: number) { this.status = status; return this }, end() { return this } }
+    await handleOpenAiRequest(
+      ctx,
+      request as unknown as IncomingMessage,
+      res as unknown as ServerResponse,
+      new URL(`${OPENAI_FACADE_PREFIX}/v1/images/edits`, 'http://127.0.0.1:3080'),
+    )
+    expect(res.status).toBe(400)
   })
 })
 

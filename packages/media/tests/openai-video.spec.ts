@@ -61,9 +61,18 @@ afterAll(async () => {
   await rm(scratch, { recursive: true, force: true })
 })
 
-async function boot(): Promise<{ ctx: Context; provider: StubVideoProvider }> {
+async function boot(options: { normalizer?: boolean } = {}): Promise<{ ctx: Context; provider: StubVideoProvider }> {
   const ctx = new Context()
   new MediaRuntimeLocal(ctx)
+  if (options.normalizer === true) {
+    // Stands in for the reference tunnel: the real one starts a static server
+    // and cloudflared, which a unit test must not do.
+    ctx.provide('mediaUrl', {
+      async normalize(file: string) {
+        return `https://tunnel.example/${file.split(/[\\/]/).pop() ?? 'ref'}`
+      },
+    })
+  }
   const provider = new StubVideoProvider()
   ctx.media.registerVideoProvider(provider)
   return { ctx, provider }
@@ -202,12 +211,29 @@ describe('openai facade: video tasks', () => {
     expect(String(info['assetPath'])).toContain(join('.assets', 'default', '05_视频片段'))
   })
 
-  it('states that reference images need the public-reference tunnel', async () => {
+  it('states that reference images need the public-reference tunnel when the host has none', async () => {
     const { ctx } = await boot()
     const { body, contentType } = multipart({ prompt: 'x' }, [{ name: 'image[]', filename: 'ref.png', data: Buffer.from([1]) }])
     const { status, json } = await call(ctx, { headers: { 'content-type': contentType }, body })
     expect(status).toBe(501)
     expect((json['error'] as { type: string }).type).toBe('unsupported_error')
+  })
+
+  it('publishes reference images as provider-fetchable URLs', async () => {
+    const { ctx, provider } = await boot({ normalizer: true })
+    const { body, contentType } = multipart(
+      { prompt: '让它动起来' },
+      [
+        { name: 'image[]', filename: 'first.png', data: Buffer.from([1, 2]) },
+        { name: 'video[]', filename: 'ref.mp4', data: Buffer.from([3, 4]) },
+      ],
+    )
+    const { status } = await call(ctx, { headers: { 'content-type': contentType }, body })
+    expect(status).toBe(200)
+    // Staged under a generated name (the upload's own name is not trusted as a
+    // path), so assert the shape rather than the original file name.
+    expect(provider.inputs[0]?.imageUrls?.[0]).toMatch(/^https:\/\/tunnel\.example\/[0-9a-f-]+\.png$/)
+    expect(provider.inputs[0]?.videoUrls?.[0]).toMatch(/^https:\/\/tunnel\.example\/[0-9a-f-]+\.mp4$/)
   })
 
   it('answers 404 for a task it never issued', async () => {
