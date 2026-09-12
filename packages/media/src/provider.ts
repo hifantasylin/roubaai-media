@@ -92,10 +92,10 @@ export interface ImageGenerateInput {
   /**
    * Explicit model override. Absent means "the model this provider is
    * configured to use" (the Settings page's active row, else its own default),
-   * which is the ordinary case. The `generate_image` tool sets it only when the
-   * configured model cannot serve the requested resolution tier and a sibling
-   * model can; a provider that cannot honour an override ignores it and names
-   * the model it actually used in `providerMeta.model`.
+   * which is the ordinary case — and the only case the tools produce: a tier the
+   * configured model cannot serve is refused, never moved onto another model. A
+   * provider that cannot honour an override ignores it and names the model it
+   * actually used in `providerMeta.model`.
    */
   model?: string
   /** Reference image URLs to guide/edit the generation (max 9; the provider truncates). */
@@ -246,7 +246,7 @@ export const DEFAULT_IMAGE_RESOLUTION = '2K'
  * and the pixel size the vendor reported back.
  */
 export interface ImageRunInfo {
-  /** The model the request ran on (the provider's configured one, or a sibling the tool selected). */
+  /** The model the request ran on. */
   model: string
   /**
    * The resolution tier the request carried (the caller's, the row's, or the
@@ -256,10 +256,6 @@ export interface ImageRunInfo {
   tier?: string
   /** Pixel size the vendor reported for the produced image (`WxH`), when it reports one. */
   size?: string
-  /** The model the caller asked for, present only when the run moved to another one. */
-  requestedModel?: string
-  /** Short Chinese explanation of a move to another model. */
-  switchNote?: string
 }
 
 /**

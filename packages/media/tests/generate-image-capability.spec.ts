@@ -216,24 +216,21 @@ describe('generate_image capability-driven tier resolution', () => {
     expect(provider.inputs[0]!.model).toBeUndefined()
   })
 
-  it('moves the request to the sibling that declares the tier, and reports the move', async () => {
+  it('refuses a tier the serving model does not declare instead of running another one', async () => {
     const provider = new CapableImageProvider({ [LITE.id]: LITE, [PRO.id]: PRO })
     const { ctx, jobs } = await boot(provider)
 
+    // The lite class cannot do 1.5K and the pro sibling can, but the deployment
+    // chose lite: the call is refused, not quietly moved onto the other model.
     const result = await callImage(ctx, { prompt: 'a red panda', resolution: '1.5K' })
-    expect(result.isError).toBe(false)
 
-    // The request itself names the sibling: the provider is told which model to
-    // run rather than left to guess from a tier it does not support.
-    const outcome = await jobs.hooks[0]!.done as { output: string }
-    expect(provider.inputs[0]).toMatchObject({ model: PRO.id, resolution: '1.5K' })
-    expect(JSON.parse(outcome.output).run).toEqual({
-      model: PRO.id,
-      tier: '1.5K',
-      size: '2496x1664',
-      requestedModel: LITE.id,
-      switchNote: `lite（${LITE.id}）不支持 1.5K，已自动改用 pro（${PRO.id}）`,
-    })
+    expect(result.isError).toBe(true)
+    const message = result.error?.message ?? ''
+    expect(message).toContain(`lite（${LITE.id}）`)
+    expect(message).toContain('2K/3K/4K')
+    expect(message).toContain(`pro（${PRO.id}）：1K/1.5K/2K`)
+    expect(jobs.started).toHaveLength(0)
+    expect(provider.inputs).toHaveLength(0)
   })
 
   it('fails a tier no listed model declares, naming the model, its tiers, its floor and the alternatives', async () => {
@@ -273,18 +270,6 @@ describe('generate_image capability-driven tier resolution', () => {
     })
     expect(tooMany.isError).toBe(true)
     expect(tooMany.error?.message).toContain('14')
-    expect(jobs.started).toHaveLength(0)
-
-    // The bound belongs to the model that RUNS, not the one that was asked for:
-    // the sibling that serves 1.5K takes 10, so 11 is over its limit even
-    // though the lite model the row configures would have accepted it.
-    const switched = await callImage(ctx, {
-      prompt: 'a montage',
-      resolution: '1.5K',
-      refImages: Array.from({ length: 11 }, (_, i) => `https://cdn/${i}.png`),
-    })
-    expect(switched.isError).toBe(true)
-    expect(switched.error?.message).toContain('10')
     expect(jobs.started).toHaveLength(0)
   })
 
@@ -328,18 +313,21 @@ describe('generate_image capability-driven tier resolution', () => {
     expect(provider.inputs[0]!.model).toBeUndefined()
   })
 
-  it('corrects a stored tier the configured model cannot serve by moving to its sibling', async () => {
+  it('refuses a stored tier the serving model cannot serve, rather than moving it', async () => {
     // A document older than the vendor's model list: the row stores 1.5K while
-    // the model it now points at is the lite class.
+    // the model it now points at is the lite class. The stored tier cannot
+    // outlive the model it was chosen for, and nothing is substituted for it.
     const provider = new CapableImageProvider({ [LITE.id]: LITE, [PRO.id]: PRO })
     const { ctx, jobs } = await boot(provider, {
       ns: MEDIA_SETTINGS_NAMESPACE,
       value: storedImageRow({ id: 'default:image', adapter: 'stub-capable', model: '', resolution: '1.5K' }),
     })
 
-    await callImage(ctx, { prompt: 'a red panda' })
-    await jobs.hooks[0]!.done
-    expect(provider.inputs[0]).toMatchObject({ model: PRO.id, resolution: '1.5K' })
+    const result = await callImage(ctx, { prompt: 'a red panda' })
+    expect(result.isError).toBe(true)
+    expect(result.error?.message ?? '').toContain('1.5K')
+    expect(jobs.started).toHaveLength(0)
+    expect(provider.inputs).toHaveLength(0)
   })
 
   it('keeps the schema free of a tier list and points at the capability instead', async () => {

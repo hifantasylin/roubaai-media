@@ -15,7 +15,7 @@
  * that way, advertising a tier the configured model did not have. Instead the
  * call is validated at tool-call time against the serving provider's own
  * `capabilities()`, and a tier the configured model cannot produce is either
- * served by a sibling model that can (the result says so) or refused with a
+ * refused with a
  * message naming the model, its tiers, and its pixel floor.
  *
  * @module @roubaai/media/tools/generate-image
@@ -67,23 +67,16 @@ function capabilityOf(provider: ImageProvider, model?: string): MediaModelCapabi
   }
 }
 
-/** One resolved run: the tier to ask for, plus the model override when the configured model cannot serve it. */
+/** One resolved run: the tier to ask for, checked against the serving model's own capability. */
 interface ResolvedImageRun {
   /** The tier the request carries; `undefined` leaves the provider's own default. */
   tier: string | undefined
-  /** Model override, present only when the run moves to a sibling model. */
-  model: string | undefined
   /**
-   * The capability of the model that will actually run (the sibling's after a
-   * move), or `undefined` for a backend that states none. Later checks read it
-   * rather than re-asking the provider, so every bound applies to the model
-   * that runs and never to the one that was asked for.
+   * The capability of the model that will serve the request, or `undefined` for a
+   * backend that states none. Later checks read it rather than re-asking the
+   * provider, so every bound applies to the model that runs.
    */
   capability: MediaModelCapability | undefined
-  /** The configured model, present only when the run moved away from it. */
-  requestedModel?: string
-  /** Short Chinese explanation of the move. */
-  switchNote?: string
 }
 
 /**
@@ -140,12 +133,12 @@ async function catalogueOf(provider: ImageProvider): Promise<readonly MediaModel
 
 /**
  * The capabilities of every OTHER model the backend lists, in the backend's own
- * order. Used both to find a sibling that covers a tier the configured model
- * cannot, and to name the alternatives in the teaching error.
+ * order. Used to name the alternatives in the teaching error, never to run one:
+ * the deployment chose a model, and the tool does not overrule it.
  * @param provider - the image provider serving the call.
  * @param catalogue - the models the backend lists.
- * @param excludeId - the configured model's id, which is not its own sibling.
- * @returns the sibling capabilities the backend states.
+ * @param excludeId - the serving model's id, which is not its own alternative.
+ * @returns the other models' capabilities as the backend states them.
  */
 function siblingCapabilities(
   provider: ImageProvider,
@@ -164,45 +157,34 @@ function siblingCapabilities(
 }
 
 /**
- * Decide which tier and model a `generate_image` call runs on, from the serving
- * provider's own per-model capability.
+ * Decide which tier a `generate_image` call runs on, from the serving provider's
+ * own per-model capability.
  *
  *  - the provider states no capability → pass through untouched (the behavior
  *    every backend without capability data has always had);
  *  - the configured model declares the tier (or declares none at all) → run it;
- *  - a SIBLING model the backend currently lists declares the tier → run the
- *    sibling and report the move, rather than failing a request the deployment
- *    can serve (the lite-class default cannot do 1.5K; the pro sibling can);
- *  - nothing can produce it → a teaching error naming the model, its tiers, its
- *    pixel floor, and the siblings with theirs.
+ *  - the configured model cannot produce it → a teaching error naming that model,
+ *    its tiers, its pixel floor, and what the backend offers instead.
+ *
+ * There is deliberately no substitution: quietly running a different model than
+ * the configured one makes the deployment's own choice a lie, and "this model
+ * cannot do that tier" is exactly the kind of answer an unsupported size gets.
  *
  * @param provider - the image provider serving the call.
  * @param requestedTier - the tier the caller or the active row asked for.
- * @returns the tier and any model override the request should carry.
- * @throws {Error} when no model this backend currently lists can produce the tier.
+ * @returns the tier to carry, plus the serving model's capability.
+ * @throws {Error} when the serving model cannot produce the requested tier.
  */
 async function resolveImageRun(provider: ImageProvider, requestedTier: string | undefined): Promise<ResolvedImageRun> {
   const active = capabilityOf(provider)
-  if (active === undefined) return { tier: requestedTier, model: undefined, capability: undefined }
+  if (active === undefined) return { tier: requestedTier, capability: undefined }
   const tier = requestedTier ?? DEFAULT_IMAGE_RESOLUTION
   if (active.tiers === undefined || active.tiers.includes(tier)) {
-    return { tier, model: undefined, capability: active }
+    return { tier, capability: active }
   }
   const catalogue = await catalogueOf(provider)
-  const siblings = catalogue === undefined
-    ? []
-    : siblingCapabilities(provider, catalogue, active.id)
-  const sibling = siblings.find((candidate) => candidate.tiers?.includes(tier) === true)
-  if (sibling !== undefined) {
-    return {
-      tier,
-      model: sibling.id,
-      capability: sibling,
-      requestedModel: active.id,
-      switchNote: `${labelOf(active)}（${active.id}）不支持 ${tier}，已自动改用 ${labelOf(sibling)}（${sibling.id}）`,
-    }
-  }
-  throw new Error(tierMismatchMessage(active, tier, siblings))
+  const alternatives = catalogue === undefined ? [] : siblingCapabilities(provider, catalogue, active.id)
+  throw new Error(tierMismatchMessage(active, tier, alternatives))
 }
 
 /**
@@ -230,14 +212,12 @@ function assertRefImagesWithinCapability(capability: MediaModelCapability | unde
  * @param result - the provider's result.
  * @param provider - the provider that produced it (for its default model).
  * @param tier - the tier the request carried, when it carried one.
- * @param run - the resolved run (its switch note, when the model moved).
  * @returns the echo to attach to the job result.
  */
 function runInfoOf(
   result: ImageGenerationResult,
   provider: ImageProvider,
   tier: string | undefined,
-  run: ResolvedImageRun,
 ): ImageRunInfo {
   const reported = result.run
   const model = reported?.model ?? result.providerMeta?.model ?? provider.defaultModel
@@ -246,10 +226,6 @@ function runInfoOf(
     model,
     ...effectiveTier === undefined ? {} : { tier: effectiveTier },
     ...reported?.size === undefined ? {} : { size: reported.size },
-    ...run.requestedModel === undefined || run.requestedModel === model ? {} : {
-      requestedModel: run.requestedModel,
-      ...run.switchNote === undefined ? {} : { switchNote: run.switchNote },
-    },
   }
 }
 
@@ -258,7 +234,7 @@ export function registerGenerateImage(ctx: Context): () => void {
 
   disposers.push(ctx.tools.register(defineTool({
     name,
-    description: `Generate an image (text-to-image or reference-image edit). Background job: returns a job id; read the completed result via job_output (1-3 min). The finished image is displayed automatically in the conversation as this job_output tool-result card — do NOT call read_image on a generated image and do NOT paste its URL / path / JSON / Markdown into your reply to "show" it. Persist with media_asset_save (reference = the job_output JSON or its resultUrl) when the asset must outlive the 24h URL expiry. For reference edits pass refImages (public https URLs only). What a model accepts — resolution tiers, the pixel floor below which it refuses a size, how many reference images it takes, which aspect ratios it serves — is the serving adapter's OWN per-model capability and is checked at call time; this schema deliberately carries no tier list, so read the tiers from the result and the Settings page instead of assuming them. Ask for a tier the configured model cannot produce and the call either runs on a sibling model that can (the result names it and says why) or fails naming that model's allowed tiers. The completed result echoes run.model, run.tier and the returned pixel run.size so the next call can be corrected. Prefer the lowest tier that carries the detail you need.`,
+    description: `Generate an image (text-to-image or reference-image edit). Background job: returns a job id; read the completed result via job_output (1-3 min). The finished image is displayed automatically in the conversation as this job_output tool-result card — do NOT call read_image on a generated image and do NOT paste its URL / path / JSON / Markdown into your reply to "show" it. Persist with media_asset_save (reference = the job_output JSON or its resultUrl) when the asset must outlive the 24h URL expiry. For reference edits pass refImages (public https URLs only). What a model accepts — resolution tiers, the pixel floor below which it refuses a size, how many reference images it takes, which aspect ratios it serves — is the serving adapter's OWN per-model capability and is checked at call time; this schema deliberately carries no tier list, so read the tiers from the result and the Settings page instead of assuming them. Ask for a tier the configured model cannot produce and the call fails naming that model's allowed tiers; no model is substituted. The completed result echoes run.model, run.tier and the returned pixel run.size so the next call can be corrected. Prefer the lowest tier that carries the detail you need.`,
     parameters: {
       prompt: { type: 'string', required: true, description: 'Image prompt' },
       refImages: {
@@ -267,7 +243,7 @@ export function registerGenerateImage(ctx: Context): () => void {
         description: 'Reference image URLs (public https only) — an earlier generated image media URL or an attachment URL. Never base64 or local paths. The per-model maximum comes from the serving adapter\'s capability (it rejects an over-long list and names the bound).',
       },
       aspectRatio: { type: 'string', enum: ['1:1', '16:9', '9:16', '4:3', '3:4'], description: '1:1 (default) | 16:9 | 9:16 | 4:3 | 3:4.' },
-      resolution: { type: 'string', description: `Resolution tier (e.g. 1K | 1.5K | 2K | 3K | 4K). The accepted set is PER MODEL and is validated at call time against the serving adapter's own capability — a tier the configured model cannot produce is served by a sibling model that can (the result names it and says why) or refused with that model's allowed tiers and pixel floor. Defaults to ${DEFAULT_IMAGE_RESOLUTION}.` },
+      resolution: { type: 'string', description: `Resolution tier (e.g. 1K | 1.5K | 2K | 3K | 4K). The accepted set is PER MODEL and is validated at call time against the serving adapter's own capability — a tier the configured model cannot produce is refused with that model's allowed tiers and pixel floor; nothing is substituted for it. Defaults to ${DEFAULT_IMAGE_RESOLUTION}.` },
       quality: { type: 'string', enum: ['low', 'medium', 'high'], description: 'low (default) | medium | high.' },
       project: { type: 'string', description: '成本记账用：当前项目名（如 奇幻超人），用于媒体成本账归档；不传则归到工作空间。' },
       label: { type: 'string', description: '成本记账用：本资产标识（如 EP01_镜02_镇民躲藏）；同一 (project,label) 第二次出现自动记为重试。' },
@@ -303,7 +279,6 @@ export function registerGenerateImage(ctx: Context): () => void {
       assertRefImagesWithinCapability(run.capability, args.refImages?.length ?? 0)
       const input: ImageGenerateInput = {
         prompt: args.prompt,
-        ...run.model === undefined ? {} : { model: run.model },
         ...args.refImages !== undefined ? { refImages: args.refImages } : {},
         ...args.aspectRatio !== undefined ? { aspectRatio: args.aspectRatio } : {},
         ...run.tier === undefined ? {} : { resolution: run.tier },
@@ -328,7 +303,7 @@ export function registerGenerateImage(ctx: Context): () => void {
               try {
                 const workspace = workspaceOf(exec.agent)
                 // The model the generation actually ran: an explicit override
-                // (the sibling switch above) beats the provider's configured
+                // (a caller-named model) beats the provider's configured
                 // model, which itself beats its default. Reading `defaultModel`
                 // here would bill the default's rate for a run that used
                 // another model.
@@ -350,7 +325,7 @@ export function registerGenerateImage(ctx: Context): () => void {
               }
               // Echo what ran (model, tier, and the vendor's returned pixel
               // size) so the caller can self-correct on its next call.
-              const runInfo = runInfoOf(result, provider, run.tier, run)
+              const runInfo = runInfoOf(result, provider, run.tier)
               return {
                 status: 'completed',
                 output: JSON.stringify({ ...result, run: runInfo }),
