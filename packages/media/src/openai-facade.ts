@@ -301,6 +301,26 @@ export async function handleOpenAiRequest(
     await listCanvasModels(ctx, res, url)
     return
   }
+  // Opening the facade's base URL in a browser is a reasonable thing to do while
+  // wiring a client up, so it answers with what it serves instead of a 405 that
+  // reads like a fault. (The endpoints themselves still refuse a GET.)
+  if ((path === '/' || path === '') && (req.method === 'GET' || req.method === 'HEAD')) {
+    sendJson(res, 200, {
+      service: 'roubaai-media openai facade',
+      basePath: OPENAI_FACADE_PREFIX,
+      endpoints: {
+        imageGeneration: `POST ${OPENAI_FACADE_PREFIX}/v1/images/generations`,
+        imageEdit: `POST ${OPENAI_FACADE_PREFIX}/v1/images/edits`,
+        videoCreate: `POST ${OPENAI_FACADE_PREFIX}/v1/videos`,
+        videoPoll: `GET ${OPENAI_FACADE_PREFIX}/v1/videos/{id}`,
+        videoContent: `GET ${OPENAI_FACADE_PREFIX}/v1/videos/{id}/content`,
+        models: `GET ${OPENAI_FACADE_PREFIX}/v1/models`,
+      },
+      note: 'A canvas is pointed at this base path by its host; provider keys stay in the harness settings and never reach the browser.',
+    })
+    return
+  }
+
   if (VIDEO_CREATE_PATHS.has(path)) {
     await createVideoTask(ctx, req, res)
     return

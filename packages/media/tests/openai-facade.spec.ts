@@ -172,6 +172,14 @@ describe('openai facade: image generations', () => {
     expect((json['data'] as Array<{ id: string }>).map((model) => model.id)).toContain('stub-image-v1')
   })
 
+  it('describes itself when its base path is opened directly', async () => {
+    const { ctx } = await boot()
+    const { status, json } = await call(ctx, { path: `${OPENAI_FACADE_PREFIX}/`, method: 'GET' })
+    expect(status).toBe(200)
+    expect(json['service']).toBe('roubaai-media openai facade')
+    expect(Object.values(json['endpoints'] as Record<string, string>)).toContain(`POST ${OPENAI_FACADE_PREFIX}/v1/images/generations`)
+  })
+
   it('rejects a non-POST method and names it', async () => {
     const { ctx } = await boot()
     const { status, json } = await call(ctx, { method: 'GET' })
