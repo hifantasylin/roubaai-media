@@ -20,8 +20,12 @@
  *
  * `canvasRoot` must be a build made with a matching `VITE_BASE` (the frontend
  * references its bundle as `/assets/...`, so a build for `/` cannot be served
- * under `/canvas/`). With no `canvasRoot` configured the route answers a plain
- * explanation instead of pretending to be an app.
+ * under `/canvas/`). The build shipped inside this package — `frontend/`, filled
+ * by `scripts/sync-frontend.mjs` before packing — is what a plain install serves,
+ * so a composition needs no configuration and carries no path from the machine
+ * that packaged it. `canvasRoot` overrides that, which is how a development
+ * checkout serves the build it is iterating on. When neither exists the route
+ * answers a plain explanation instead of pretending to be an app.
  *
  * @module @roubaai/canvas
  */
@@ -77,9 +81,51 @@ function findPackageRoot(start: string): string {
 /** Where this package's own files live (the shipped node plugin). */
 const packageRoot = findPackageRoot(dirname(fileURLToPath(import.meta.url)))
 
+/** The frontend build shipped inside this package, beside `lib/`. */
+export function bundledCanvasRoot(): string {
+  return join(packageRoot, 'frontend')
+}
+
+/** The directory a composition ended up serving, and how it got there. */
+export interface CanvasRootChoice {
+  /** The directory to serve, or `''` when there is no frontend at all. */
+  readonly root: string
+  /** `configured` for an override that exists, `bundled` for the shipped build. */
+  readonly source: 'configured' | 'bundled' | 'missing'
+  /** The resolved `canvasRoot` the composition asked for, when it asked for one. */
+  readonly requested: string
+}
+
+/**
+ * Decide which frontend directory to serve.
+ *
+ * A configured root wins while it actually holds an `index.html`, so a
+ * development checkout keeps serving the build it is iterating on. Otherwise the
+ * build shipped in this package is served, which is what makes a plain install
+ * work with no configuration and no path from the packaging machine.
+ * @param configured - the composition's `canvasRoot`, if it set one.
+ * @param bundled - the shipped frontend directory; overridden in tests.
+ * @param hasIndex - the existence probe; overridden in tests.
+ * @returns the chosen directory, why it was chosen, and what was asked for.
+ */
+export function pickCanvasRoot(
+  configured: string | undefined,
+  bundled: string = bundledCanvasRoot(),
+  hasIndex: (directory: string) => boolean = directory => existsSync(join(directory, 'index.html')),
+): CanvasRootChoice {
+  const given = (configured ?? '').trim()
+  const requested = given === '' ? '' : resolve(given)
+  if (requested !== '' && hasIndex(requested)) return { root: requested, source: 'configured', requested }
+  if (hasIndex(bundled)) return { root: bundled, source: 'bundled', requested }
+  return { root: '', source: 'missing', requested }
+}
+
 /** Configuration the composition supplies for this plugin. */
 export interface CanvasConfig {
-  /** Built frontend directory (`VITE_BASE` must match {@link CanvasConfig.basePath}). */
+  /**
+   * Built frontend directory (`VITE_BASE` must match {@link CanvasConfig.basePath}).
+   * Omit it to serve the build shipped inside this package.
+   */
   readonly canvasRoot?: string
   /** Mount point; defaults to `/canvas`. */
   readonly basePath?: string
@@ -126,21 +172,32 @@ function send(res: ServerResponse, status: number, contentType: string, body: st
   res.end(payload)
 }
 
-/** The instruction a deployment sees when the frontend artifact is missing. */
-function missingRootMessage(basePath: string): string {
+/**
+ * The instruction a deployment sees when there is no frontend to serve.
+ *
+ * It names every directory that was looked in, because "no canvasRoot" once
+ * covered both "nothing is configured" and "the configured path is not there",
+ * and the second reads as a configuration mistake when it is usually a stale
+ * path from the machine that built the install.
+ * @param basePath - the mount point being served.
+ * @param requested - the `canvasRoot` the composition set, if any.
+ * @returns the plain-text explanation.
+ */
+function missingRootMessage(basePath: string, requested: string): string {
   return [
-    `@roubaai/canvas: no canvasRoot is configured, so there is no frontend to serve at ${basePath}/.`,
+    `@roubaai/canvas: no canvas frontend to serve at ${basePath}/.`,
     '',
-    'Build the workbench with a matching base path and point canvasRoot at it:',
+    'Looked in:',
+    requested === ''
+      ? '  - canvasRoot: not configured'
+      : `  - canvasRoot: ${requested} (no index.html there)`,
+    `  - the build shipped in this package: ${bundledCanvasRoot()} (absent)`,
+    '',
+    'Build the workbench with a matching base path, then either ship it inside',
+    'this package or point canvasRoot at it:',
     '  cd <infinite-canvas>/web',
     `  VITE_BASE=${basePath}/ bun install && VITE_BASE=${basePath}/ bun run build`,
-    '',
-    'then set the router row:',
-    '  - id: roubaai-canvas',
-    "    name: '@roubaai/canvas'",
-    '    config:',
-    `      basePath: ${basePath}`,
-    '      canvasRoot: <absolute path to .../web/dist>',
+    '  node packages/canvas/scripts/sync-frontend.mjs   # copy that build into the package',
     '',
   ].join('\n')
 }
@@ -170,7 +227,7 @@ export async function handleCanvasRequest(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  config: { basePath: string; canvasRoot: string; openaiBasePath: string },
+  config: { basePath: string; canvasRoot: string; requestedCanvasRoot?: string; openaiBasePath: string },
 ): Promise<void> {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     send(res, 405, 'text/plain; charset=utf-8', 'method not allowed')
@@ -225,7 +282,7 @@ export async function handleCanvasRequest(
   }
 
   if (canvasRoot === '') {
-    send(res, 503, 'text/plain; charset=utf-8', missingRootMessage(basePath))
+    send(res, 503, 'text/plain; charset=utf-8', missingRootMessage(basePath, config.requestedCanvasRoot ?? ''))
     return
   }
 
@@ -244,7 +301,7 @@ export async function handleCanvasRequest(
   try {
     send(res, 200, 'text/html; charset=utf-8', await readFile(join(canvasRoot, 'index.html')))
   } catch {
-    send(res, 503, 'text/plain; charset=utf-8', missingRootMessage(basePath))
+    send(res, 503, 'text/plain; charset=utf-8', missingRootMessage(basePath, canvasRoot))
   }
 }
 
@@ -277,11 +334,15 @@ export function handlePanelInfoRequest(
  */
 export function apply(ctx: Context, config: CanvasConfig = {}): void {
   const basePath = normalizeBasePath(config.basePath)
-  const canvasRoot = resolve(config.canvasRoot ?? '')
+  const choice = pickCanvasRoot(config.canvasRoot)
   const openaiBasePath = config.openaiBasePath ?? DEFAULT_OPENAI_BASE_PATH
   const panelInfoPath = normalizeBasePath(config.panelInfoPath ?? DEFAULT_PANEL_INFO_PATH)
-  if (canvasRoot === '') {
-    ctx.logger.warn(`roubaai-canvas: canvasRoot is unset; ${basePath}/ will explain how to build the frontend`)
+  if (choice.source === 'configured') {
+    ctx.logger.info(`roubaai-canvas: serving the canvas from ${choice.root}`)
+  } else if (choice.source === 'bundled' && choice.requested !== '') {
+    ctx.logger.warn(`roubaai-canvas: canvasRoot ${choice.requested} has no index.html; serving the build shipped with this package instead`)
+  } else if (choice.source === 'missing') {
+    ctx.logger.warn(`roubaai-canvas: no canvas frontend; ${basePath}/ will explain how to build one`)
   }
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
@@ -289,7 +350,8 @@ export function apply(ctx: Context, config: CanvasConfig = {}): void {
     handler: (req, res): void => {
       void handleCanvasRequest(req, res, new URL(req.url ?? basePath, 'http://dsh.internal'), {
         basePath,
-        canvasRoot,
+        canvasRoot: choice.root,
+        requestedCanvasRoot: choice.requested,
         openaiBasePath,
       })
     },

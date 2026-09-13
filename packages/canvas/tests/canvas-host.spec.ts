@@ -1,11 +1,12 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Writable } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { apply, handleCanvasRequest, handlePanelInfoRequest, resolveCanvasFile } from '../src/index.ts'
+import { apply, bundledCanvasRoot, handleCanvasRequest, handlePanelInfoRequest, pickCanvasRoot, resolveCanvasFile } from '../src/index.ts'
 
 let root = ''
 
@@ -62,6 +63,69 @@ describe('canvas host: confinement', () => {
 
   it('keeps a path inside the frontend directory', () => {
     expect(resolveCanvasFile(root, 'assets/app.js')).toBe(join(root, 'assets', 'app.js'))
+  })
+})
+
+describe('canvas host: which frontend gets served', () => {
+  const anything = () => true
+  const nothing = () => false
+  const bundled = 'C:/package/frontend'
+
+  it('prefers a configured root while it holds a build', () => {
+    const choice = pickCanvasRoot('C:/checkout/web/dist', bundled, anything)
+    expect(choice.source).toBe('configured')
+    expect(choice.root).toContain('web')
+  })
+
+  it('falls back to the build shipped in the package when the configured root is gone', () => {
+    // The reported bug: a packaged install carried the packaging machine's path.
+    const choice = pickCanvasRoot('C:/packaging-machine/web/dist', bundled, directory => directory === bundled)
+    expect(choice.source).toBe('bundled')
+    expect(choice.root).toBe(bundled)
+    expect(choice.requested).toContain('packaging-machine')
+  })
+
+  it('serves the shipped build when nothing is configured', () => {
+    const choice = pickCanvasRoot(undefined, bundled, anything)
+    expect(choice.source).toBe('bundled')
+    expect(choice.root).toBe(bundled)
+    expect(choice.requested).toBe('')
+  })
+
+  it('treats a blank canvasRoot as unconfigured', () => {
+    expect(pickCanvasRoot('   ', bundled, anything).source).toBe('bundled')
+  })
+
+  it('reports nothing to serve when neither the configured root nor the shipped build exists', () => {
+    const choice = pickCanvasRoot('C:/gone', bundled, nothing)
+    expect(choice.source).toBe('missing')
+    expect(choice.root).toBe('')
+  })
+
+  it('serves the frontend the package actually ships, once it has been synced in', async () => {
+    const shipped = bundledCanvasRoot()
+    const hasShipped = existsSync(join(shipped, 'index.html'))
+    const choice = pickCanvasRoot(undefined)
+    const { status, text } = await get('/canvas/', {
+      basePath: '/canvas',
+      canvasRoot: choice.root,
+      requestedCanvasRoot: choice.requested,
+      openaiBasePath: '/api/roubaai-media/openai',
+    })
+    if (hasShipped) {
+      // A release build: the tarball carries the workbench, so an install with no
+      // configuration of its own serves a real app.
+      expect(status).toBe(200)
+      expect(text).toContain('/canvas/assets/')
+      expect(text).toContain('id="root"')
+      return
+    }
+    // A source checkout that never ran `sync:frontend` has nothing to serve, and
+    // the explanation must name the path it looked in rather than claim that no
+    // canvasRoot was configured.
+    expect(status).toBe(503)
+    expect(text).toContain('no canvas frontend to serve')
+    expect(text).toContain(shipped)
   })
 })
 
@@ -166,7 +230,7 @@ describe('canvas host: route registration', () => {
   function mounted(config: Parameters<typeof apply>[1] = {}): Route[] {
     const routes: Route[] = []
     const ctx = {
-      logger: { warn: () => undefined },
+      logger: { info: () => undefined, warn: () => undefined },
       effect: (fn: () => unknown) => fn(),
       webServer: {
         register: (route: Route) => {

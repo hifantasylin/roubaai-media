@@ -14,7 +14,9 @@
     "typecheck": "pnpm -r run typecheck",
     "test": "vitest run",
     "clean": "pnpm -r exec node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\"",
-    "pack:all": "pnpm -r exec pnpm pack --pack-destination ../../dist"
+    "sync:canvas-frontend": "node packages/canvas/scripts/sync-frontend.mjs",
+    "check:canvas-frontend": "node packages/canvas/scripts/sync-frontend.mjs --check",
+    "pack:all": "pnpm run sync:canvas-frontend && pnpm -r exec pnpm pack --pack-destination ../../dist"
   },
   "devDependencies": {
     "@types/node": "^22.20.0",

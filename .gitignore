@@ -13,3 +13,7 @@ debug.log
 # Media asset library root the generate_* tools write into; a spec that runs
 # with the repository as its workspace leaves one behind.
 .assets/
+
+# The canvas frontend is a build artifact from its own repository: it is produced
+# by `packages/canvas/scripts/sync-frontend.mjs` and ships inside the tarball.
+packages/canvas/frontend/
