@@ -7,6 +7,10 @@
  * tab embeds pages in an opaque origin, which would turn every generation call
  * into a foreign-origin request the facade refuses.
  *
+ * The session the panel was opened for rides the URL (`ds`), so the canvas can
+ * tell the host which workspace its requests belong to without ever naming a
+ * path of its own.
+ *
  * The height contract is the one the sidebar documents for the tabs it hosts:
  * the pane body has a definite height but is not a flex container, so the root
  * states `height: 100%` itself.
@@ -14,7 +18,7 @@
  */
 
 import { useSyncExternalStore, type JSX } from 'react'
-import { canvasUrlSnapshot, subscribeCanvasUrl } from './canvas-url.ts'
+import { canvasUrlSnapshot, subscribeCanvasUrl, withHostSession } from './canvas-url.ts'
 
 /** The pane body has a definite height; the root states its own 100%. */
 const ROOT_STYLE = { height: '100%', minHeight: 0 } as const
@@ -26,13 +30,14 @@ const FRAME_STYLE = {
 
 /**
  * Render the canvas as the sidebar tab's body.
+ * @param props - the sidebar's session scope for this tab.
  * @returns the canvas iframe, at the URL the store currently holds.
  */
-export function CanvasPanel(): JSX.Element {
-  const src = useSyncExternalStore(subscribeCanvasUrl, canvasUrlSnapshot)
+export function CanvasPanel({ sessionId }: { sessionId: string }): JSX.Element {
+  const url = useSyncExternalStore(subscribeCanvasUrl, canvasUrlSnapshot)
   return (
     <div style={ROOT_STYLE}>
-      <iframe title="画布" src={src} style={FRAME_STYLE} />
+      <iframe title="画布" src={withHostSession(url, sessionId)} style={FRAME_STYLE} />
     </div>
   )
 }

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { ASSETS_ROUTE_PREFIX, assetsRoot, handleAssetsRequest, parseRange, resolveAssetPath } from '../src/asset-routes.ts'
+import { ASSETS_ROUTE_PREFIX, handleAssetsRequest, parseRange, resolveInRoot, rootsForWorkspace } from '../src/asset-routes.ts'
 import { createTempAssetsRoot } from './temp-assets.ts'
 
 let root = ''
@@ -74,27 +74,109 @@ async function get(path: string, headers: Record<string, string> = {}): Promise<
   }
 }
 
-describe('asset routes: confinement', () => {
-  it('refuses a path that climbs out of the asset root', () => {
-    expect(resolveAssetPath('../../secret.txt')).toBeUndefined()
-    expect(resolveAssetPath('proj/../../../secret.txt')).toBeUndefined()
+describe('asset routes: roots', () => {
+  it('reads the mounted library as the writable root when the request names no session', () => {
+    const roots = rootsForWorkspace(undefined)
+    expect(roots.primary.path).toBe(root)
+    expect(roots.primary.writable).toBe(true)
+    expect(roots.mounts).toEqual([])
+  })
+
+  it('writes in the workspace and mounts the library read-only when it does', () => {
+    const roots = rootsForWorkspace(join(root, '.ws'))
+    expect(roots.primary.path).toBe(join(root, '.ws', '.assets'))
+    expect(roots.primary.writable).toBe(true)
+    expect(roots.mounts.map(mount => mount.path)).toEqual([root])
+    expect(roots.mounts[0]?.writable).toBe(false)
+  })
+
+  it('refuses a path that climbs out of a root', () => {
+    expect(resolveInRoot(root, '../../secret.txt')).toBeUndefined()
+    expect(resolveInRoot(root, 'proj/../../../secret.txt')).toBeUndefined()
   })
 
   it('refuses a drive letter and keeps a leading-slash path inside the root', () => {
-    expect(resolveAssetPath('C:/Windows/win.ini')).toBeUndefined()
+    expect(resolveInRoot(root, 'C:/Windows/win.ini')).toBeUndefined()
     // A POSIX-style absolute path is not absolute on Windows; it is stripped to a
     // relative one, so it lands inside the tree instead of at the filesystem root.
-    expect(resolveAssetPath('/etc/passwd')).toBe(join(root, 'etc', 'passwd'))
+    expect(resolveInRoot(root, '/etc/passwd')).toBe(join(root, 'etc', 'passwd'))
   })
 
-  it('keeps a path inside the tree and answers the serving root', () => {
-    expect(resolveAssetPath('proj/clip.mp4')).toBe(join(root, 'proj', 'clip.mp4'))
-    expect(assetsRoot()).toBe(root)
+  it('keeps a path inside the tree', () => {
+    expect(resolveInRoot(root, 'proj/clip.mp4')).toBe(join(root, 'proj', 'clip.mp4'))
   })
 
   it('answers 400 for an escaping file request instead of 404, so the refusal is visible', async () => {
     const { status } = await get('/file?path=../secret.txt')
     expect(status).toBe(400)
+  })
+})
+
+describe('asset routes: session scope', () => {
+  /** A request that names a session, resolved to a workspace by the caller. */
+  async function getAs(path: string, sessionId: string, workspace: string | undefined): Promise<{ status: number; json: Record<string, unknown> }> {
+    const res = fakeResponse()
+    await handleAssetsRequest(
+      fakeRequest() as unknown as IncomingMessage,
+      res as unknown as ServerResponse,
+      new URL(`${ASSETS_ROUTE_PREFIX}${path}`, 'http://127.0.0.1:3080'),
+      (id) => (id === sessionId ? workspace : undefined),
+    )
+    await new Promise<void>((resolve) => {
+      if (res.writableFinished) resolve()
+      else res.on('finish', () => resolve())
+    })
+    return { status: res.status, json: JSON.parse(Buffer.concat(res.chunks).toString('utf8')) as Record<string, unknown> }
+  }
+
+  it('resolves the workspace host-side, so a caller cannot name a directory', async () => {
+    const workspace = join(root, '.ws')
+    await mkdir(join(workspace, '.assets', '剧本'), { recursive: true })
+    await writeFile(join(workspace, '.assets', '剧本', 'outline.md'), 'act one')
+    // The mounted library holds the other project; the workspace holds this one.
+    const { status, json } = await getAs('/library?session=s1', 's1', workspace)
+    expect(status).toBe(200)
+    const projects = json['projects'] as Array<Record<string, unknown>>
+    expect(projects.map(project => [project['root'], project['name']])).toEqual([
+      ['workspace', '剧本'],
+      ['global', 'proj'],
+    ])
+    expect(json['roots']).toEqual([{ id: 'workspace', writable: true }, { id: 'global', writable: false }])
+  })
+
+  it('addresses each tree by root id', async () => {
+    const workspace = join(root, '.ws')
+    await mkdir(join(workspace, '.assets', '剧本'), { recursive: true })
+    await writeFile(join(workspace, '.assets', '剧本', 'outline.md'), 'act one')
+    const scoped = await getAs('/tree?session=s1&root=workspace&path=剧本', 's1', workspace)
+    expect((scoped.json['entries'] as Array<{ name: string }>).map(entry => entry.name)).toEqual(['outline.md'])
+    const mounted = await getAs('/tree?session=s1&root=global', 's1', workspace)
+    expect((mounted.json['entries'] as Array<{ name: string }>).map(entry => entry.name)).toEqual(['proj'])
+  })
+
+  it('refuses an unknown root id instead of substituting another tree', async () => {
+    const { status, json } = await getAs('/tree?root=nowhere', 's1', root)
+    expect(status).toBe(400)
+    expect(String(json['error'])).toContain('nowhere')
+  })
+
+  it('refuses an upload into a mounted library', async () => {
+    const res = fakeResponse()
+    const payload = new Readable({
+      read() {
+        this.push(Buffer.from('--x--\r\n'))
+        this.push(null)
+      },
+    })
+    Object.assign(payload, { method: 'POST', headers: { 'content-type': 'multipart/form-data; boundary=x' } })
+    await handleAssetsRequest(
+      payload as unknown as IncomingMessage,
+      res as unknown as ServerResponse,
+      new URL(`${ASSETS_ROUTE_PREFIX}/upload?session=s1&root=global`, 'http://127.0.0.1:3080'),
+      () => root,
+    )
+    expect(res.status).toBe(403)
+    expect(Buffer.concat(res.chunks).toString('utf8')).toContain('read-only')
   })
 })
 

@@ -9,9 +9,9 @@ kind: "package-bundle"
 
 ## 概述
 
-`dsh-media` 让 dsh Agent 能够通过可替换的提供商生成并管理媒体。它挂载 `ctx.media` 注册表、`ctx.mediaUrl` 本地引用归一化器，以及七个与提供商无关的模型可见工具——`generate_image`、`generate_video`、`generate_music`、`media_asset_save`、`media_reference_url`、`media_extract_frame` 与 `media_cost_summary`。`dsh-media-maizi`、`dsh-media-mxapi` 等提供商 bundle 把图像、视频与音乐后端注册到同一个注册表；注册一个提供商即可把它接入工具。生成以后台任务方式运行，调用从不阻塞在长达数分钟的提供商工作上；结果通过会话的 `job_output` 到达，想要的媒体会在提供商 URL 过期前被持久化进用户资产库。当组合需要让模型生产或引用图像、视频、音乐资产并保留按用户统计的成本记录时，选择本包。
+`dsh-media` 让 dsh Agent 能够通过可替换的提供商生成并管理媒体。它挂载 `ctx.media` 注册表、`ctx.mediaUrl` 本地引用归一化器，以及七个与提供商无关的模型可见工具——`generate_image`、`generate_video`、`generate_music`、`media_asset_save`、`media_reference_url`、`media_extract_frame` 与 `media_cost_summary`。`dsh-media-maizi`、`dsh-media-mxapi` 等提供商 bundle 把图像、视频与音乐后端注册到同一个注册表；注册一个提供商即可把它接入工具。生成以后台任务方式运行，调用从不阻塞在长达数分钟的提供商工作上；结果通过会话的 `job_output` 到达，想要的媒体会在提供商 URL 过期前被持久化进工作区资产库。当组合需要让模型生产或引用图像、视频、音乐资产并保留按项目统计的成本记录时，选择本包。
 
-媒体落进**用户级唯一根目录** `$DSH_HOME/assets`（可用 `DSH_MEDIA_ASSETS_ROOT` 覆盖），本包内所有路径都相对它解析：`media_asset_save` 工具、成本账本、画布门面，以及工作台浏览所用的只读路由。项目是该根目录下的一级目录，因此资产的生命周期长于产生它的对话与工作区，Agent、画布资产库与后续合成步骤看到的是同一批文件。
+媒体落进**会话自己的工作空间** `<cwd>/.assets`（一个项目一个目录），所以资产随项目走，也不会悄悄撑爆系统盘。用户级库 `$DSH_HOME/assets`（可用 `DSH_MEDIA_ASSETS_ROOT` 覆盖）作为**只读挂载**并列存在，用于跨项目复用：被多个工作空间共用的角色、风格锚点或配乐。所有路径都由 `asset-root.ts` 解析——`media_asset_save` 工具、成本账本、画布门面、引用隧道，以及工作台浏览所用的只读路由——并且请求只携带会话 id、从不携带路径，由宿主把它解析成目录。
 
 ## 目录
 
@@ -42,12 +42,12 @@ kind: "package-bundle"
 | 工具 | 行为 |
 |---|---|
 | `generate_image` / `generate_video` / `generate_music` | 启动后台生成任务并返回其 id；结果携带提供商任务句柄与 24 小时媒体 URL |
-| `media_asset_save` | 把生成或上传的资产持久化到 `<assetsRoot>/<project>/<dir>/<name>.<ext>` 并更新资产索引 |
+| `media_asset_save` | 把生成或上传的资产持久化到 `<workspace>/.assets/<project>/<dir>/<name>.<ext>` 并更新资产索引 |
 | `media_reference_url` | 把本地或 host-local 引用重新发布为可供后续提供商调用的全新公共 URL |
 | `media_extract_frame` | 从视频文件中抽取一帧 |
 | `media_cost_summary` | 把工作区媒体成本账本汇总为面向所有者的可读摘要 |
 
-每次生成任务都会向成本账本（`<assetsRoot>/<project>/media-cost.jsonl`）追加一行：视频与音乐为提供商上报值，图像为费率表估算值。账本的 project 与 label 参数来自模型调用，并驱动重试识别。
+每次生成任务都会向成本账本（`<workspace>/.assets/<project>/media-cost.jsonl`）追加一行：视频与音乐为提供商上报值，图像为费率表估算值。账本的 project 与 label 参数来自模型调用，并驱动重试识别。
 
 ### 提供商选择
 
@@ -133,7 +133,7 @@ kind: "package-bundle"
 
 #### 模型看到什么
 
-完成的任务通过会话的 `job_output` 上报提供商任务句柄与 24 小时媒体 URL。模型用 `media_asset_save` 把想保留的内容持久化到 `<assetsRoot>/<project>/<dir>/<name>.<ext>`（并维护 `assets-index.md`），用 `media_reference_url` 把本地或 host-local 路径重新发布为后续提供商调用可用的全新公共 URL，用 `media_extract_frame` 抽取视频帧。
+完成的任务通过会话的 `job_output` 上报提供商任务句柄与 24 小时媒体 URL。模型用 `media_asset_save` 把想保留的内容持久化到 `<workspace>/.assets/<project>/<dir>/<name>.<ext>`（并维护 `assets-index.md`），用 `media_reference_url` 把本地或 host-local 路径重新发布为后续提供商调用可用的全新公共 URL，用 `media_extract_frame` 抽取视频帧。
 
 #### Token 影响
 
@@ -147,7 +147,7 @@ kind: "package-bundle"
 
 #### 模型看到什么
 
-每次完成的生成都会向 `<assetsRoot>/<project>/media-cost.jsonl` 追加一行——视频与音乐为提供商上报值，图像为费率表估算值——`media_cost_summary` 工具再把账本折叠成面向所有者的可读总额，含按项目与按 label 的分解，以及对重复 label 的重试标记。
+每次完成的生成都会向 `<workspace>/.assets/<project>/media-cost.jsonl` 追加一行——视频与音乐为提供商上报值，图像为费率表估算值——`media_cost_summary` 工具再把账本折叠成面向所有者的可读总额，含按项目与按 label 的分解，以及对重复 label 的重试标记。
 
 #### Token 影响
 
@@ -166,7 +166,7 @@ kind: "package-bundle"
 - **生成受提供商与密钥门控** — 工具需要至少一个所需种类的提供商已挂载且其凭据可解析；两者任一缺失，调用会以 `NO_PROVIDER` 或 missing-credential 错误失败。
 - **提供商 URL 会过期** — 生成结果携带约 24 小时的有效 URL，想要的媒体应在窗口关闭前用 `media_asset_save` 持久化。
 - **本地引用需要公共 URL** — `media_reference_url` 通过本地静态服务器与隧道把本地与 host-local 路径变成公共 URL；部署缺少可用的隧道二进制时，本地引用媒体没有出路。
-- **成本账本按用户且带 rouba 口味** — 账本文件位于 `<assetsRoot>/`，目录名来自模型提供的 `project` 标签（缺省回退到 `default`），工具描述带有制作工作流词汇。
+- **成本账本按项目且带 rouba 口味** — 账本文件位于 `<workspace>/.assets/`，目录名来自模型提供的 `project` 标签（缺省回退到 `default`），工具描述带有制作工作流词汇。
 - **不做内联媒体交付** — 每个生成工具都是后台任务，输出是一个 job id；媒体只能以文本 URL 或落盘文件到达模型，绝不以内联结果块出现。
 
 <a id="dev-note"></a>

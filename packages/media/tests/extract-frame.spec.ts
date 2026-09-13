@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -8,15 +8,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { registerExtractFrame } from '../src/tools/extract-frame.ts'
-import { createTempAssetsRoot } from './temp-assets.ts'
 
 const testToolSignal = new AbortController().signal
 
-const assets = createTempAssetsRoot('roubaai-frame-')
-let assetsDir = ''
-
-beforeEach(() => { assetsDir = assets.install() })
-afterEach(async () => { await assets.restore() })
 
 /** 探测 ffmpeg/ffprobe（PATH 或 WinGet 安装位），注入 FFMPEG_BIN/FFPROBE_BIN 供工具复用。 */
 const ffprobeBin = (): string | undefined => {
@@ -122,7 +116,7 @@ describe.skipIf(!hasFfmpeg())('media_extract_frame tool', () => {
     // 落盘的是有效 png（PNG 魔数）
     const head = readFileSync(f).subarray(0, 4).toString('hex')
     expect(head).toBe('89504e47')
-    const indexPath = join(assetsDir, '测试项目', 'assets-index.md')
+    const indexPath = join(ws, '.assets', '测试项目', 'assets-index.md')
     expect(readFileSync(indexPath, 'utf8')).toContain('小美/姿态/拔剑')
   })
 

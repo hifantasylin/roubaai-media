@@ -6,6 +6,10 @@
  * URL this module owns. Links and the tab read the same store, which is why one
  * source of truth is enough — no tab seed, no per-open identity.
  *
+ * The panel also names the session it was opened for (`ds`), because the host
+ * resolves a request's workspace host-side from the session id: a browser that
+ * sent a path would be asking the host to read whatever it named.
+ *
  * The mount point is deployment configuration (`basePath` in the composition),
  * so it comes from the host half's panel route rather than being duplicated
  * here; {@link FALLBACK_BASE_PATH} covers the first paint and a host that does
@@ -80,6 +84,21 @@ export function canvasBasePath(): string {
 export function showCanvas(target?: string): void {
   requested = target === undefined || target === '' ? undefined : target
   refresh()
+}
+
+/**
+ * Add the session marker to a canvas URL.
+ *
+ * The canvas reads it from its own query string and passes it back on every host
+ * request, which is how the host knows which workspace the request belongs to.
+ * @param url - the canvas URL (path, query and fragment).
+ * @param sessionId - the session the panel was opened for.
+ * @returns the URL with `ds` set.
+ */
+export function withHostSession(url: string, sessionId: string): string {
+  if (sessionId === '') return url
+  const separator = url.includes('?') ? '&' : '?'
+  return `${url}${separator}ds=${encodeURIComponent(sessionId)}`
 }
 
 /**

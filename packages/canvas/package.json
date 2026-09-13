@@ -1,7 +1,7 @@
 {
   "name": "@roubaai/canvas",
   "description": "Canvas workbench for the harness: serves the built infinite-canvas frontend and its node plugin on the harness origin, and contributes the canvas as a right-sidebar tab",
-  "version": "0.1.2-rc.8",
+  "version": "0.1.2-rc.9",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

@@ -9,9 +9,9 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-media` gives a dsh agent the ability to generate and manage media through interchangeable providers. It mounts the `ctx.media` registry, the `ctx.mediaUrl` local-reference normalizer, and seven model-facing tools — `generate_image`, `generate_video`, `generate_music`, `media_asset_save`, `media_reference_url`, `media_extract_frame`, and `media_cost_summary` — that stay provider-agnostic. Provider bundles such as `dsh-media-maizi` and `dsh-media-mxapi` register image, video, and music backends onto the same registry; registering a provider is all it takes to wire it to the tools. Generation runs as background jobs so calls never block on minute-long provider work, results arrive through the session's `job_output`, and wanted media is persisted into the user asset library before provider URLs expire. Choose this package when a composition should let the model produce or reference image, video, or music assets and keep a per-user cost record of it.
+`dsh-media` gives a dsh agent the ability to generate and manage media through interchangeable providers. It mounts the `ctx.media` registry, the `ctx.mediaUrl` local-reference normalizer, and seven model-facing tools — `generate_image`, `generate_video`, `generate_music`, `media_asset_save`, `media_reference_url`, `media_extract_frame`, and `media_cost_summary` — that stay provider-agnostic. Provider bundles such as `dsh-media-maizi` and `dsh-media-mxapi` register image, video, and music backends onto the same registry; registering a provider is all it takes to wire it to the tools. Generation runs as background jobs so calls never block on minute-long provider work, results arrive through the session's `job_output`, and wanted media is persisted into the workspace asset library before provider URLs expire. Choose this package when a composition should let the model produce or reference image, video, or music assets and keep a per-project cost record of it.
 
-Media lands in one root for the whole user — `$DSH_HOME/assets`, overridable with `DSH_MEDIA_ASSETS_ROOT` — and every path in this package resolves against it: the `media_asset_save` tool, the cost ledger, the canvas facade, and the read routes the workbench browses. A project is a directory under that root, so an asset outlives the conversation and the workspace it was produced in, and the agent, the canvas library, and a later compositing step all see the same files.
+Media lands in the session's own workspace — `<cwd>/.assets`, one directory per production — so assets travel with the project and never quietly fill the system drive. The user-level library `$DSH_HOME/assets` (overridable with `DSH_MEDIA_ASSETS_ROOT`) stays mounted read-only beside it for the cross-project case: a character, a style anchor or a piece of music reused by several workspaces. Everything resolves through `asset-root.ts` — the `media_asset_save` tool, the cost ledger, the canvas facade, the reference tunnel, and the read routes the workbench browses — and a request names a session rather than a path, so the host is what turns it into a directory.
 
 ## Table of Contents
 
@@ -42,12 +42,12 @@ The media row takes no configuration; each provider row configures its own endpo
 | Tool | Behavior |
 |---|---|
 | `generate_image` / `generate_video` / `generate_music` | Start a background generation job and return its id; results carry a provider task handle and a 24-hour media URL |
-| `media_asset_save` | Persist a generated or uploaded asset into `<assetsRoot>/<project>/<dir>/<name>.<ext>` and update the asset index |
+| `media_asset_save` | Persist a generated or uploaded asset into `<workspace>/.assets/<project>/<dir>/<name>.<ext>` and update the asset index |
 | `media_reference_url` | Re-publish a local or host-local reference as a fresh public URL for a later provider call |
 | `media_extract_frame` | Pull one frame from a video file |
 | `media_cost_summary` | Fold the workspace media cost ledger into an owner-readable summary |
 
-Each generation job appends one line to the cost ledger (`<assetsRoot>/<project>/media-cost.jsonl`): provider-reported for video and music, a rate-table estimate for images. The ledger's project and label arguments come from the model call and drive retry detection.
+Each generation job appends one line to the cost ledger (`<workspace>/.assets/<project>/media-cost.jsonl`): provider-reported for video and music, a rate-table estimate for images. The ledger's project and label arguments come from the model call and drive retry detection.
 
 ### Provider selection
 
@@ -133,7 +133,7 @@ Prefix-stable while the visible tool definitions and order are unchanged; provid
 
 #### What the model sees
 
-A finished job reports through the session's `job_output` with a provider task handle and a 24-hour media URL. The model persists what it wants to keep with `media_asset_save` into `<assetsRoot>/<project>/<dir>/<name>.<ext>` (with an `assets-index.md`), re-publishes local or host-local paths as fresh public URLs for later provider calls with `media_reference_url`, and pulls video frames with `media_extract_frame`.
+A finished job reports through the session's `job_output` with a provider task handle and a 24-hour media URL. The model persists what it wants to keep with `media_asset_save` into `<workspace>/.assets/<project>/<dir>/<name>.<ext>` (with an `assets-index.md`), re-publishes local or host-local paths as fresh public URLs for later provider calls with `media_reference_url`, and pulls video frames with `media_extract_frame`.
 
 #### Token effect
 
@@ -147,7 +147,7 @@ Append-only for ordinary results; newly visible content follows the reusable req
 
 #### What the model sees
 
-Every completed generation writes one line to `<assetsRoot>/<project>/media-cost.jsonl` — provider-reported for video and music, a rate-table estimate for images — and the `media_cost_summary` tool folds the ledger into an owner-readable total with per-project and per-label breakdowns and a retry marker for repeated labels.
+Every completed generation writes one line to `<workspace>/.assets/<project>/media-cost.jsonl` — provider-reported for video and music, a rate-table estimate for images — and the `media_cost_summary` tool folds the ledger into an owner-readable total with per-project and per-label breakdowns and a retry marker for repeated labels.
 
 #### Token effect
 
@@ -166,7 +166,7 @@ These limits define when the media capability is a poor fit or needs special ope
 - **Generation is provider- and key-gated** — the tools need at least one provider of the needed kind mounted and its credential resolvable; absent either, calls fail with `NO_PROVIDER` or a missing-credential error.
 - **Provider URLs expire** — generation results carry a roughly 24-hour URL, so wanted media must be persisted with `media_asset_save` before the window closes.
 - **Local references need a public URL** — `media_reference_url` turns local and host-local paths into public URLs through a local static server and a tunnel; a deployment without a reachable tunnel binary has no path for local-reference media.
-- **The cost ledger is user-scoped and rouba-flavored** — ledger files live under `<assetsRoot>/`, directory names come from the model-supplied `project` label (defaulting to `default`), and the tool descriptions carry production-workflow vocabulary.
+- **The cost ledger is project-scoped and rouba-flavored** — ledger files live under `<workspace>/.assets/`, directory names come from the model-supplied `project` label (defaulting to `default`), and the tool descriptions carry production-workflow vocabulary.
 - **No inline media delivery** — every generate tool is a background job whose output is a job id; media reaches the model only as text URLs or persisted files, never as an inline result block.
 
 <a id="dev-note"></a>

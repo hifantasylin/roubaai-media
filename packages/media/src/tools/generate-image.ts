@@ -31,7 +31,7 @@ import type {
 } from '../provider.ts'
 import { MEDIA_SETTINGS_NAMESPACE, readActiveAdapter, readActiveMediaProvider } from '../settings-lookup.ts'
 import { appendMediaCost, DEFAULT_PROJECT } from '../cost-ledger.ts'
-import { assetsRoot } from '../asset-root.ts'
+import { primaryAssetsRoot, workspaceOfAgent } from '../asset-root.ts'
 
 export const name = 'generate_image'
 
@@ -301,7 +301,7 @@ export function registerGenerateImage(ctx: Context): () => void {
               // resolution. A ledger write failure must never fail the
               // generation itself.
               try {
-                const assets = assetsRoot()
+                const assets = primaryAssetsRoot(workspaceOfAgent(exec.agent))
                 // The model the generation actually ran: an explicit override
                 // (a caller-named model) beats the provider's configured
                 // model, which itself beats its default. Reading `defaultModel`

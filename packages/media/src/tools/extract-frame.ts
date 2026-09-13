@@ -18,7 +18,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView } from '@deepseek-ai/dsh-tools'
 import { appendIndex, extractPublicUrl, resolveSource } from './media-asset-save.ts'
-import { assetsRoot } from '../asset-root.ts'
+import { primaryAssetsRoot, workspaceOfAgent } from '../asset-root.ts'
 
 export const name = 'media_extract_frame'
 
@@ -96,7 +96,7 @@ export function registerExtractFrame(ctx: Context): () => void {
       const safeName = args.name.replace(/[\\:*?"<>|]/g, '_')
       const count = args.count
 
-      const assets = assetsRoot()
+      const assets = primaryAssetsRoot(workspaceOfAgent(exec.agent))
       const projectDir = join(assets, args.project)
       const category = args.category
 

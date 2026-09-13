@@ -21,7 +21,7 @@ import type { VideoCaps, VideoGenerateInput, VideoGenerationResult, VideoTaskPol
 import { readActiveAdapter } from '../settings-lookup.ts'
 import { appendMediaCost, DEFAULT_PROJECT } from '../cost-ledger.ts'
 import { downloadToCache } from '../media-cache.ts'
-import { assetsRoot } from '../asset-root.ts'
+import { primaryAssetsRoot, workspaceOfAgent } from '../asset-root.ts'
 
 export const name = 'generate_video'
 
@@ -244,7 +244,7 @@ export function registerGenerateVideo(ctx: Context): () => void {
                 // costUsd, fall back to the rate-table estimate. A ledger write
                 // failure must never fail the generation itself.
                 try {
-                  const assets = assetsRoot()
+                  const assets = primaryAssetsRoot(workspaceOfAgent(exec.agent))
                   const reported = (result.providerMeta as { costUsd?: unknown } | undefined)?.costUsd
                   const reportedUsd = typeof reported === 'number' && Number.isFinite(reported) ? reported : undefined
                   const estimated = provider.estimateCostUsd(

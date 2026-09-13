@@ -34,7 +34,7 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView } from '@deepseek-ai/dsh-tools'
 import { cachedMediaBytes } from '../media-cache.ts'
-import { assetsRoot } from '../asset-root.ts'
+import { primaryAssetsRoot, workspaceOfAgent } from '../asset-root.ts'
 import { ASSET_CATEGORIES, isAssetCategory, landMediaAsset, resolveLandingPath } from '../asset-landing.ts'
 
 export const name = 'media_asset_save'
@@ -260,7 +260,7 @@ export function registerMediaAssetSave(ctx: Context): () => void {
         throw new Error(`media_asset_save: unsupported category ${category}; use one of ${CATEGORIES.join(', ')}`)
       }
 
-      const assets = assetsRoot()
+      const assets = primaryAssetsRoot(workspaceOfAgent(exec.agent))
       const isVideo = source.kind === 'url'
         ? isVideoUrl(source.url)
         : source.kind === 'attachment' ? source.ref.mediaType.includes('video') : false

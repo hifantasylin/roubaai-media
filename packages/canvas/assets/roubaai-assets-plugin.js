@@ -104,11 +104,17 @@ export default function roubaaiAssets(runtime) {
   const IMAGE = [".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"];
   const VIDEO = [".mp4", ".webm", ".mov", ".mkv"];
 
+  // The canvas is opened for one session, and the host resolves that session's
+  // workspace itself: the browser names an id, never a directory. Routes without
+  // it fall back to the host's default tree.
+  const SESSION = new URLSearchParams(window.location.search).get("ds") ?? "";
+  const withSession = (url) => SESSION === "" ? url : `${url}${url.includes("?") ? "&" : "?"}session=${encodeURIComponent(SESSION)}`;
+
   const extOf = (name) => {
     const dot = name.lastIndexOf(".");
     return dot < 0 ? "" : name.slice(dot).toLowerCase();
   };
-  const fileUrl = (path) => `${FILE}?path=${encodeURIComponent(path)}`;
+  const fileUrl = (path) => withSession(`${FILE}?path=${encodeURIComponent(path)}`);
   const isImage = (name) => IMAGE.includes(extOf(name));
   const isVideo = (name) => VIDEO.includes(extOf(name));
 
@@ -121,7 +127,7 @@ export default function roubaaiAssets(runtime) {
     React.useEffect(() => {
       let alive = true;
       setStatus("读取中…");
-      fetch(`${TREE}?path=${encodeURIComponent(dir)}`)
+      fetch(withSession(`${TREE}?path=${encodeURIComponent(dir)}`))
         .then((response) => response.json())
         .then((json) => {
           if (!alive) return;
@@ -250,7 +256,7 @@ export default function roubaaiAssets(runtime) {
 
     React.useEffect(() => {
       let alive = true;
-      fetch(`${TREE}?path=`)
+      fetch(withSession(`${TREE}?path=`))
         .then((response) => response.json())
         .then((json) => {
           if (!alive) return;

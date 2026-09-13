@@ -65,7 +65,10 @@ export function apply(ctx: Context): void {
     // One canvas: an open from a link reveals the panel already showing it
     // rather than stacking a second copy of the same app.
     single: true,
-    component: () => <CanvasPanel />,
+    // The session scope is the tab's own: it is what tells the canvas which
+    // workspace its asset and generation requests belong to, without the
+    // browser ever naming a path.
+    component: ({ scope }) => <CanvasPanel sessionId={scope.sessionId} />,
   }), 'roubaai-canvas: sidebar tab')
 
   ctx.effect(() => registerCanvasLinkTakeover((target) => {

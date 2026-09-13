@@ -106,7 +106,7 @@ export class MediaUrlNormalizer extends Service {
       // and never taken from the URL, so the public tunnel can only read files
       // under the directory the asset library lives in.
       const base = await this.ensureStarted(workspaceRoot)
-      const root = this.root ?? workspaceRoot ?? stagingRoot()
+      const root = this.root ?? stagingRoot(workspaceRoot)
       return `${base}/_local/${this.toPublicPath(ref, root)}`
     }
     return ref
@@ -125,7 +125,7 @@ export class MediaUrlNormalizer extends Service {
   private ensureStarted(workspaceRoot?: string): Promise<string> {
     if (this.baseUrl !== undefined) return Promise.resolve(this.baseUrl)
     if (this.starting !== undefined) return this.starting
-    this.root = workspaceRoot ?? stagingRoot()
+    this.root = stagingRoot(workspaceRoot)
     this.starting = this.start()
     return this.starting
   }

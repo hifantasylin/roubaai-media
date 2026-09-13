@@ -37,9 +37,11 @@ import type { Context } from '@deepseek-ai/cordis'
 // Type-only: pulls the webServer Context augmentation (ctx.webServer).
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { cachedMediaBytes, cachedMediaFile, downloadToCache } from './media-cache.ts'
-import { assetsRoot, stagingRoot } from './asset-root.ts'
+import { primaryAssetsRoot, stagingRoot } from './asset-root.ts'
+import { workspaceOfSession } from './asset-routes.ts'
 import { landMediaAsset } from './asset-landing.ts'
 import { appendMediaCost } from './cost-ledger.ts'
+// Shared with the asset routes: the session a canvas run belongs to.
 import { fileFields, parseMultipart, textField } from './multipart.ts'
 import { MEDIA_SETTINGS_NAMESPACE, readActiveAdapter, readActiveMediaProvider } from './settings-lookup.ts'
 import type { ImageGenerateInput, ImageGenerationResult, ImageProvider, VideoGenerateInput, VideoProvider, VideoTaskHandle } from './provider.ts'
@@ -68,7 +70,7 @@ function sendPreflight(req: IncomingMessage, res: ServerResponse): void {
   res.writeHead(204, {
     ...(origin === undefined || origin === '' ? {} : { 'access-control-allow-origin': origin }),
     'access-control-allow-methods': 'GET, POST, OPTIONS',
-    'access-control-allow-headers': 'content-type, authorization, x-roubaai-project, x-roubaai-dir, x-roubaai-name, x-roubaai-category',
+    'access-control-allow-headers': 'content-type, authorization, x-roubaai-session, x-roubaai-project, x-roubaai-dir, x-roubaai-name, x-roubaai-category',
     'access-control-max-age': '600',
     'cache-control': 'no-store',
   })
@@ -116,6 +118,8 @@ function pruneVideoTasks(): void {
 }
 
 
+/** Header naming the session a canvas run belongs to; the host resolves its workspace. */
+export const SESSION_HEADER = 'x-roubaai-session'
 /** Header naming the project folder under the asset root. */
 export const PROJECT_HEADER = 'x-roubaai-project'
 /** Header naming the landing sub-directory under the project. */
@@ -503,7 +507,7 @@ async function createImageEdit(ctx: Context, req: IncomingMessage, res: ServerRe
     sendJson(res, 400, { error: { message: 'expected at least one image part to edit', type: 'invalid_request_error' } })
     return
   }
-  const published = await publishReferences(ctx, imageParts, stagingRoot())
+  const published = await publishReferences(ctx, imageParts, stagingRoot(workspaceOfSession(ctx, headerValue(req, SESSION_HEADER))))
   if (published === undefined) {
     sendJson(res, 501, {
       error: {
@@ -708,7 +712,8 @@ async function recordCanvasRun(options: {
   spec: string
   costUsd: number
 }): Promise<{ landed?: string; ledger: boolean }> {
-  const assets = assetsRoot()
+  const workspace = workspaceOfSession(options.ctx, headerValue(options.req, SESSION_HEADER))
+  const assets = primaryAssetsRoot(workspace)
   const project = headerValue(options.req, PROJECT_HEADER) ?? DEFAULT_PROJECT
   const name = headerValue(options.req, NAME_HEADER) ?? timestampName()
   let landed: string | undefined
@@ -791,7 +796,7 @@ async function createVideoTask(ctx: Context, req: IncomingMessage, res: ServerRe
   }
   // A reference the provider must fetch has to become a public URL first: the
   // provider is a third party, and a same-origin route is not reachable from it.
-  const staging = stagingRoot()
+  const staging = stagingRoot(workspaceOfSession(ctx, headerValue(req, SESSION_HEADER)))
   const imageParts = [...fileFields(parts, 'image'), ...fileFields(parts, 'images')]
   const videoParts = [...fileFields(parts, 'video'), ...fileFields(parts, 'videos')]
   const audioParts = [...fileFields(parts, 'audio'), ...fileFields(parts, 'audios')]

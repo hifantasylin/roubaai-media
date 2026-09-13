@@ -13,7 +13,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView } from '@deepseek-ai/dsh-tools'
 import { summarizeMediaCost, MediaCostSummary } from '../cost-ledger.ts'
-import { assetsRoot } from '../asset-root.ts'
+import { primaryAssetsRoot, workspaceOfAgent } from '../asset-root.ts'
 
 export const name = 'media_cost_summary'
 
@@ -65,8 +65,8 @@ export function registerMediaCostSummary(ctx: Context): () => void {
       },
       render: (_args, value) => [{ type: 'text', text: value.text }],
     },
-    async execute(args) {
-      const assets = assetsRoot()
+    async execute(args, exec) {
+      const assets = primaryAssetsRoot(workspaceOfAgent(exec.agent))
       let since: number | undefined
       if (args.since !== undefined) {
         const parsed = Date.parse(args.since)
