@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Writable } from 'node:stream'
+import { Readable, Writable } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ASSETS_ROUTE_PREFIX, assetsRoot, handleAssetsRequest, parseRange, resolveAssetPath } from '../src/asset-routes.ts'
 
@@ -119,6 +119,109 @@ describe('asset routes: tree', () => {
   it('answers 404 for a directory that does not exist', async () => {
     const { status } = await get('/tree?path=nope')
     expect(status).toBe(404)
+  })
+})
+
+describe('asset routes: library', () => {
+  it('lists the whole tree as projects and files', async () => {
+    const { status, json } = await get('/library')
+    expect(status).toBe(200)
+    const projects = json['projects'] as Array<Record<string, unknown>>
+    expect(projects).toHaveLength(1)
+    expect(projects[0]).toMatchObject({ name: 'proj', files: 2, bytes: 13 })
+    // The newest image is what the library shows as the project's cover.
+    expect(String(projects[0]?.['cover'])).toBe('proj/01_角色/a.png')
+    const files = json['files'] as Array<Record<string, unknown>>
+    expect(files.map(file => file['path']).sort()).toEqual(['proj/01_角色/a.png', 'proj/clip.mp4'])
+    expect(files.find(file => file['name'] === 'a.png')).toMatchObject({ project: 'proj', group: '01_角色', kind: 'image', size: 8 })
+    // A file filed directly in the project has no group.
+    expect(files.find(file => file['name'] === 'clip.mp4')).toMatchObject({ group: '', kind: 'video' })
+  })
+
+  it('keeps the tree bookkeeping out of the library', async () => {
+    await writeFile(join(root, '.assets', 'proj', 'assets-index.md'), '| 类别 |')
+    await writeFile(join(root, '.assets', 'proj', 'media-cost.jsonl'), '{}\n')
+    const { json } = await get('/library')
+    const paths = (json['files'] as Array<Record<string, unknown>>).map(file => file['path'])
+    expect(paths).not.toContain('proj/assets-index.md')
+    expect(paths).not.toContain('proj/media-cost.jsonl')
+  })
+
+  it('answers an empty library when the tree does not exist', async () => {
+    await rm(join(root, '.assets'), { recursive: true, force: true })
+    const { status, json } = await get('/library')
+    expect(status).toBe(200)
+    expect(json).toMatchObject({ ok: true, projects: [], files: [], truncated: false })
+  })
+
+  it('orders projects by their newest file', async () => {
+    await mkdir(join(root, '.assets', 'older'), { recursive: true })
+    await writeFile(join(root, '.assets', 'older', 'x.png'), Buffer.from([1]))
+    const past = new Date(Date.now() - 86_400_000)
+    await utimes(join(root, '.assets', 'older', 'x.png'), past, past)
+    const { json } = await get('/library')
+    expect((json['projects'] as Array<Record<string, unknown>>).map(project => project['name'])).toEqual(['proj', 'older'])
+  })
+
+  it('never hands out an absolute path', async () => {
+    const { json } = await get('/library')
+    expect(JSON.stringify(json)).not.toContain(root)
+  })
+})
+
+describe('asset routes: upload', () => {
+  /** One multipart body with a project field and one file part. */
+  function multipart(project: string, filename: string, content: Buffer): { body: Buffer; contentType: string } {
+    const boundary = '----roubaai-test'
+    const body = Buffer.concat([
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="project"\r\n\r\n${project}\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: image/png\r\n\r\n`),
+      content,
+      Buffer.from(`\r\n--${boundary}--\r\n`),
+    ])
+    return { body, contentType: `multipart/form-data; boundary=${boundary}` }
+  }
+
+  async function post(payload: { body: Buffer; contentType: string }): Promise<{ status: number; json: Record<string, unknown> }> {
+    const res = fakeResponse()
+    // A request stream the handler can attach its body listeners to, then read.
+    const request = new Readable({
+      read() {
+        this.push(payload.body)
+        this.push(null)
+      },
+    })
+    Object.assign(request, { method: 'POST', headers: { 'content-type': payload.contentType } })
+    await handleAssetsRequest(
+      request as unknown as IncomingMessage,
+      res as unknown as ServerResponse,
+      new URL(`${ASSETS_ROUTE_PREFIX}/upload`, 'http://127.0.0.1:3080'),
+    )
+    return { status: res.status, json: JSON.parse(Buffer.concat(res.chunks).toString('utf8')) as Record<string, unknown> }
+  }
+
+  it('lands an uploaded file through the asset landing path', async () => {
+    const { status, json } = await post(multipart('proj', 'poster.png', Buffer.from('IMAGE')))
+    expect(status).toBe(200)
+    expect(json['ok']).toBe(true)
+    const saved = json['saved'] as Array<Record<string, unknown>>
+    expect(String(saved[0]?.['relative'])).toBe('proj/08_上传/poster.png')
+    // Written through landing, so the project index records it too.
+    const index = await readFile(join(root, '.assets', 'proj', 'assets-index.md'), 'utf8')
+    expect(index).toContain('poster.png')
+    // An upload answers relative paths only, like every other listing here.
+    expect(JSON.stringify(json)).not.toContain(root)
+  })
+
+  it('refuses a project that escapes the asset root', async () => {
+    const { status, json } = await post(multipart('../outside', 'poster.png', Buffer.from('IMAGE')))
+    expect(status).toBe(400)
+    expect(String(json['error'])).toContain('project')
+  })
+
+  it('takes POST only', async () => {
+    const { status } = await get('/upload')
+    expect(status).toBe(405)
   })
 })
 
