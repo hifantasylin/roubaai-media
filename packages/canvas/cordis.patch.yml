@@ -1,7 +1,9 @@
 # dsh bundle layer: mount the canvas host. It serves the built infinite-canvas
 # frontend and its node plugin on the harness origin, so the canvas is reachable
 # as a same-origin app and the browser half can call the media routes without a
-# CORS hop. The frontend itself is a build artifact: point `canvasRoot` at it.
+# CORS hop. The frontend ships inside this package (`frontend/`), so mounting the
+# row is all an install needs; `canvasRoot` is only an override for serving a
+# development checkout's build instead.
 - insert:
     - id: roubaai-canvas
       name: '@roubaai/canvas'
