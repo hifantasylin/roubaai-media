@@ -16,7 +16,9 @@
     "clean": "pnpm -r exec node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\"",
     "sync:canvas-frontend": "node packages/canvas/scripts/sync-frontend.mjs",
     "check:canvas-frontend": "node packages/canvas/scripts/sync-frontend.mjs --check",
-    "pack:all": "pnpm run sync:canvas-frontend && pnpm -r exec pnpm pack --pack-destination ../../dist"
+    "sync:brand-logo": "node packages/brand/scripts/sync-logo.mjs",
+    "check:brand-logo": "node packages/brand/scripts/sync-logo.mjs --check",
+    "pack:all": "pnpm run check:brand-logo && pnpm run sync:canvas-frontend && pnpm -r exec pnpm pack --pack-destination ../../dist"
   },
   "devDependencies": {
     "@types/node": "^22.20.0",
