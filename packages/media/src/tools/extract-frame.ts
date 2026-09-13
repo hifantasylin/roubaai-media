@@ -17,7 +17,8 @@ import { randomUUID } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView } from '@deepseek-ai/dsh-tools'
-import { appendIndex, extractPublicUrl, resolveSource, workspaceOf } from './media-asset-save.ts'
+import { appendIndex, extractPublicUrl, resolveSource } from './media-asset-save.ts'
+import { assetsRoot } from '../asset-root.ts'
 
 export const name = 'media_extract_frame'
 
@@ -56,7 +57,7 @@ export function registerExtractFrame(ctx: Context): () => void {
         type: 'string', required: true,
         description: 'The video to extract from. Accepts a Markdown image/video reference, a host URL (/describe-image/raw/... or /api/media.stream/...), a public https URL, a local file path, or a sha256 id.',
       },
-      project: { type: 'string', required: true, description: 'Project folder name; frames land under <workspace>/.assets/<project>/<category>/.' },
+      project: { type: 'string', required: true, description: 'Project folder name; frames land under <assetsRoot>/<project>/<category>/.' },
       category: { type: 'string', enum: [...CATEGORIES], required: true, description: 'Asset category. 推荐 keyframe = 从视频抽出的参考帧（续拍/姿态/场景时刻）；按内容归入 character/scene/prop 也可.' },
       name: { type: 'string', required: true, description: 'File base name without extension. May include `/` sub-paths (e.g. 小美/姿态/拔剑). Multi-frame extraction appends _1, _2…' },
       time: { type: 'number', description: 'Extract the frame at this second (e.g. 3.5). Mutually exclusive with count; default extracts the middle frame (50%).' },
@@ -95,8 +96,8 @@ export function registerExtractFrame(ctx: Context): () => void {
       const safeName = args.name.replace(/[\\:*?"<>|]/g, '_')
       const count = args.count
 
-      const workspace = workspaceOf(exec.agent)
-      const projectDir = join(workspace, '.assets', args.project)
+      const assets = assetsRoot()
+      const projectDir = join(assets, args.project)
       const category = args.category
 
       // 计划抽帧时刻：time → [t]；count → 均匀 N 点；默认 → 中点。

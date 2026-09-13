@@ -37,6 +37,7 @@ import type { Context } from '@deepseek-ai/cordis'
 // Type-only: pulls the webServer Context augmentation (ctx.webServer).
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { cachedMediaBytes, cachedMediaFile, downloadToCache } from './media-cache.ts'
+import { assetsRoot, stagingRoot } from './asset-root.ts'
 import { landMediaAsset } from './asset-landing.ts'
 import { appendMediaCost } from './cost-ledger.ts'
 import { fileFields, parseMultipart, textField } from './multipart.ts'
@@ -67,7 +68,7 @@ function sendPreflight(req: IncomingMessage, res: ServerResponse): void {
   res.writeHead(204, {
     ...(origin === undefined || origin === '' ? {} : { 'access-control-allow-origin': origin }),
     'access-control-allow-methods': 'GET, POST, OPTIONS',
-    'access-control-allow-headers': 'content-type, authorization, x-roubaai-workspace, x-roubaai-project, x-roubaai-dir, x-roubaai-name, x-roubaai-category',
+    'access-control-allow-headers': 'content-type, authorization, x-roubaai-project, x-roubaai-dir, x-roubaai-name, x-roubaai-category',
     'access-control-max-age': '600',
     'cache-control': 'no-store',
   })
@@ -115,9 +116,7 @@ function pruneVideoTasks(): void {
 }
 
 
-/** Header a caller uses to name the workspace the run should be billed to. */
-export const WORKSPACE_HEADER = 'x-roubaai-workspace'
-/** Header naming the project folder under `.assets/`. */
+/** Header naming the project folder under the asset root. */
 export const PROJECT_HEADER = 'x-roubaai-project'
 /** Header naming the landing sub-directory under the project. */
 export const DIR_HEADER = 'x-roubaai-dir'
@@ -504,8 +503,7 @@ async function createImageEdit(ctx: Context, req: IncomingMessage, res: ServerRe
     sendJson(res, 400, { error: { message: 'expected at least one image part to edit', type: 'invalid_request_error' } })
     return
   }
-  const workspace = headerValue(req, WORKSPACE_HEADER) ?? process.cwd()
-  const published = await publishReferences(ctx, imageParts, workspace)
+  const published = await publishReferences(ctx, imageParts, stagingRoot())
   if (published === undefined) {
     sendJson(res, 501, {
       error: {
@@ -710,7 +708,7 @@ async function recordCanvasRun(options: {
   spec: string
   costUsd: number
 }): Promise<{ landed?: string; ledger: boolean }> {
-  const workspace = headerValue(options.req, WORKSPACE_HEADER) ?? process.cwd()
+  const assets = assetsRoot()
   const project = headerValue(options.req, PROJECT_HEADER) ?? DEFAULT_PROJECT
   const name = headerValue(options.req, NAME_HEADER) ?? timestampName()
   let landed: string | undefined
@@ -718,7 +716,7 @@ async function recordCanvasRun(options: {
   if (bytes !== undefined && options.remoteUrl !== undefined) {
     try {
       const asset = await landMediaAsset({
-        workspace,
+        assetsRoot: assets,
         project,
         dir: headerValue(options.req, DIR_HEADER) ?? options.defaultDir,
         name,
@@ -736,7 +734,7 @@ async function recordCanvasRun(options: {
   }
   let ledger = false
   try {
-    await appendMediaCost(workspace, {
+    await appendMediaCost(assets, {
       ts: Date.now(),
       tool: options.tool,
       model: options.model,
@@ -793,13 +791,13 @@ async function createVideoTask(ctx: Context, req: IncomingMessage, res: ServerRe
   }
   // A reference the provider must fetch has to become a public URL first: the
   // provider is a third party, and a same-origin route is not reachable from it.
-  const workspace = headerValue(req, WORKSPACE_HEADER) ?? process.cwd()
+  const staging = stagingRoot()
   const imageParts = [...fileFields(parts, 'image'), ...fileFields(parts, 'images')]
   const videoParts = [...fileFields(parts, 'video'), ...fileFields(parts, 'videos')]
   const audioParts = [...fileFields(parts, 'audio'), ...fileFields(parts, 'audios')]
-  const images = await publishReferences(ctx, imageParts, workspace)
-  const videos = await publishReferences(ctx, videoParts, workspace)
-  const audios = await publishReferences(ctx, audioParts, workspace)
+  const images = await publishReferences(ctx, imageParts, staging)
+  const videos = await publishReferences(ctx, videoParts, staging)
+  const audios = await publishReferences(ctx, audioParts, staging)
   if (images === undefined || videos === undefined || audios === undefined) {
     sendJson(res, 501, {
       error: {

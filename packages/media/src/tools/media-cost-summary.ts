@@ -1,6 +1,6 @@
 /**
  * `media_cost_summary` tool: fold the automatic media cost ledger
- * (`<workspace>/.assets/media-cost.jsonl`, written by the generate_* tools on
+ * (`<assetsRoot>/<project>/media-cost.jsonl`, written by the generate_* tools on
  * every completion) into a model/owner-readable total. Used when the user asks
  * about cost, or when the cost-tracker document needs an actual-vs-expected
  * refresh — the ledger itself is automatic, so this tool never depends on the
@@ -13,7 +13,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView } from '@deepseek-ai/dsh-tools'
 import { summarizeMediaCost, MediaCostSummary } from '../cost-ledger.ts'
-import { workspaceOf } from './media-asset-save.ts'
+import { assetsRoot } from '../asset-root.ts'
 
 export const name = 'media_cost_summary'
 
@@ -44,7 +44,7 @@ export function registerMediaCostSummary(ctx: Context): () => void {
     parameters: {
       project: {
         type: 'string',
-        description: 'Filter by project name (e.g. 奇幻超人). Default: the whole workspace. Entries recorded without a project fall back to the workspace path.',
+        description: 'Filter by project name (e.g. 奇幻超人). Default: every project. Entries recorded without a project are filed under default.',
       },
       since: {
         type: 'string',
@@ -65,15 +65,15 @@ export function registerMediaCostSummary(ctx: Context): () => void {
       },
       render: (_args, value) => [{ type: 'text', text: value.text }],
     },
-    async execute(args, exec) {
-      const workspace = workspaceOf(exec.agent)
+    async execute(args) {
+      const assets = assetsRoot()
       let since: number | undefined
       if (args.since !== undefined) {
         const parsed = Date.parse(args.since)
         if (Number.isNaN(parsed)) throw new Error('media_cost_summary: since must be an ISO 8601 date')
         since = parsed
       }
-      const summary = await summarizeMediaCost(workspace, {
+      const summary = await summarizeMediaCost(assets, {
         ...args.project !== undefined ? { project: args.project } : {},
         ...since !== undefined ? { since } : {},
       })
@@ -88,7 +88,7 @@ export function registerMediaCostSummary(ctx: Context): () => void {
       }
     },
     presentCall(args): GenericCallView {
-      return { card: 'generic', title: 'Media cost summary', kind: 'execute', rawInput: args.project ?? 'workspace' }
+      return { card: 'generic', title: 'Media cost summary', kind: 'execute', rawInput: args.project ?? 'all projects' }
     },
   }))
 }

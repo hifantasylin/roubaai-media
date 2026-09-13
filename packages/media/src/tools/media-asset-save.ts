@@ -13,11 +13,12 @@
  * written asynchronously. On completion a message is delivered to the owner's
  * session with the saved path.
  *
- * The asset root is the current session's working directory
- * (`agent.session.header.cwd`, falling back to `process.cwd()`), mirroring how
- * `dsh-agent-teams` scopes its `.agent-teams/` state to the caller's workspace:
- *   `<cwd>/.assets/<category>/<name>.png|.mp4`
- *   `<cwd>/.assets/assets-index.md`
+ * The asset root is the user's library (`$DSH_HOME/assets`, resolved by
+ * `../asset-root.ts`), not the session's working directory: an asset belongs to
+ * the user and outlives the conversation that produced it, and the canvas
+ * library reads the same tree.
+ *   `<assetsRoot>/<project>/<dir>/<name>.png|.mp4`
+ *   `<assetsRoot>/<project>/assets-index.md`
  *
  * The `reference` parameter accepts every shape the model may actually have in
  * context: an attachment JSON object, a host-local image URL, a host-local
@@ -29,11 +30,11 @@
 
 import { readFile } from 'node:fs/promises'
 import { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView } from '@deepseek-ai/dsh-tools'
 import { cachedMediaBytes } from '../media-cache.ts'
+import { assetsRoot } from '../asset-root.ts'
 import { ASSET_CATEGORIES, isAssetCategory, landMediaAsset, resolveLandingPath } from '../asset-landing.ts'
 
 export const name = 'media_asset_save'
@@ -76,11 +77,6 @@ function sniffStoredMediaType(data: Uint8Array): string {
     && data[0] === 0x52 && data[1] === 0x49 && data[2] === 0x46 && data[3] === 0x46
     && data[8] === 0x57 && data[9] === 0x45 && data[10] === 0x42 && data[11] === 0x50) return 'image/webp'
   return 'image/png'
-}
-
-/** The caller's workspace directory (team state root parent pattern). */
-export function workspaceOf(agent: Agent | undefined): string {
-  return agent?.session?.header?.cwd ?? process.cwd()
 }
 
 /** Normalize any reference shape the model may have into a fetchable/readable source. */
@@ -264,7 +260,7 @@ export function registerMediaAssetSave(ctx: Context): () => void {
         throw new Error(`media_asset_save: unsupported category ${category}; use one of ${CATEGORIES.join(', ')}`)
       }
 
-      const workspace = workspaceOf(exec.agent)
+      const assets = assetsRoot()
       const isVideo = source.kind === 'url'
         ? isVideoUrl(source.url)
         : source.kind === 'attachment' ? source.ref.mediaType.includes('video') : false
@@ -276,7 +272,7 @@ export function registerMediaAssetSave(ctx: Context): () => void {
         : isVideo ? 'mp4' : isAudio ? 'mp3' : 'png'
       // Resolve (and validate) the destination before the job starts, so a bad
       // name or directory fails the call instead of an invisible background job.
-      const { filePath, safeDir, safeName } = resolveLandingPath({ workspace, project: args.project, dir: args.dir, name: args.name, ext }, 'media_asset_save')
+      const { filePath, safeDir, safeName } = resolveLandingPath({ assetsRoot: assets, project: args.project, dir: args.dir, name: args.name, ext }, 'media_asset_save')
 
       const jobId = ctx.jobs.start({
         kind: 'media-asset',
@@ -291,7 +287,7 @@ export function registerMediaAssetSave(ctx: Context): () => void {
               // display URL is registered so the same-origin stream route serves
               // THIS copy rather than going back to the provider.
               const landed = await landMediaAsset({
-                workspace,
+                assetsRoot: assets,
                 project: args.project,
                 dir: args.dir,
                 name: args.name,

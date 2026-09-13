@@ -1,27 +1,25 @@
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ASSETS_ROUTE_PREFIX, assetsRoot, handleAssetsRequest, parseRange, resolveAssetPath } from '../src/asset-routes.ts'
+import { createTempAssetsRoot } from './temp-assets.ts'
 
 let root = ''
-const previous = process.env['DSH_MEDIA_ASSETS_ROOT']
+const assets = createTempAssetsRoot('roubaai-assets-')
 
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), 'roubaai-assets-'))
-  process.env['DSH_MEDIA_ASSETS_ROOT'] = root
-  await mkdir(join(root, '.assets', 'proj', '01_角色'), { recursive: true })
-  await writeFile(join(root, '.assets', 'proj', '01_角色', 'a.png'), Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]))
-  await writeFile(join(root, '.assets', 'proj', 'clip.mp4'), Buffer.from('video'))
-  await writeFile(join(root, 'secret.txt'), 'not an asset')
+  root = assets.install()
+  await mkdir(join(root, 'proj', '01_角色'), { recursive: true })
+  await writeFile(join(root, 'proj', '01_角色', 'a.png'), Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]))
+  await writeFile(join(root, 'proj', 'clip.mp4'), Buffer.from('video'))
+  await writeFile(join(dirname(root), 'secret.txt'), 'not an asset')
 })
 
 afterEach(async () => {
-  if (previous === undefined) delete process.env['DSH_MEDIA_ASSETS_ROOT']
-  else process.env['DSH_MEDIA_ASSETS_ROOT'] = previous
-  await rm(root, { recursive: true, force: true })
+  await assets.restore()
 })
 
 function fakeRequest(method = 'GET', headers: Record<string, string> = {}) {
@@ -86,12 +84,12 @@ describe('asset routes: confinement', () => {
     expect(resolveAssetPath('C:/Windows/win.ini')).toBeUndefined()
     // A POSIX-style absolute path is not absolute on Windows; it is stripped to a
     // relative one, so it lands inside the tree instead of at the filesystem root.
-    expect(resolveAssetPath('/etc/passwd')).toBe(join(root, '.assets', 'etc', 'passwd'))
+    expect(resolveAssetPath('/etc/passwd')).toBe(join(root, 'etc', 'passwd'))
   })
 
   it('keeps a path inside the tree and answers the serving root', () => {
-    expect(resolveAssetPath('proj/clip.mp4')).toBe(join(root, '.assets', 'proj', 'clip.mp4'))
-    expect(assetsRoot()).toBe(join(root, '.assets'))
+    expect(resolveAssetPath('proj/clip.mp4')).toBe(join(root, 'proj', 'clip.mp4'))
+    expect(assetsRoot()).toBe(root)
   })
 
   it('answers 400 for an escaping file request instead of 404, so the refusal is visible', async () => {
@@ -139,8 +137,8 @@ describe('asset routes: library', () => {
   })
 
   it('keeps the tree bookkeeping out of the library', async () => {
-    await writeFile(join(root, '.assets', 'proj', 'assets-index.md'), '| 类别 |')
-    await writeFile(join(root, '.assets', 'proj', 'media-cost.jsonl'), '{}\n')
+    await writeFile(join(root, 'proj', 'assets-index.md'), '| 类别 |')
+    await writeFile(join(root, 'proj', 'media-cost.jsonl'), '{}\n')
     const { json } = await get('/library')
     const paths = (json['files'] as Array<Record<string, unknown>>).map(file => file['path'])
     expect(paths).not.toContain('proj/assets-index.md')
@@ -148,17 +146,18 @@ describe('asset routes: library', () => {
   })
 
   it('answers an empty library when the tree does not exist', async () => {
-    await rm(join(root, '.assets'), { recursive: true, force: true })
+    // Removing the whole tree is how this spec stands in for "no library yet".
+    await rm(root, { recursive: true, force: true })
     const { status, json } = await get('/library')
     expect(status).toBe(200)
     expect(json).toMatchObject({ ok: true, projects: [], files: [], truncated: false })
   })
 
   it('orders projects by their newest file', async () => {
-    await mkdir(join(root, '.assets', 'older'), { recursive: true })
-    await writeFile(join(root, '.assets', 'older', 'x.png'), Buffer.from([1]))
+    await mkdir(join(root, 'older'), { recursive: true })
+    await writeFile(join(root, 'older', 'x.png'), Buffer.from([1]))
     const past = new Date(Date.now() - 86_400_000)
-    await utimes(join(root, '.assets', 'older', 'x.png'), past, past)
+    await utimes(join(root, 'older', 'x.png'), past, past)
     const { json } = await get('/library')
     expect((json['projects'] as Array<Record<string, unknown>>).map(project => project['name'])).toEqual(['proj', 'older'])
   })
@@ -207,7 +206,7 @@ describe('asset routes: upload', () => {
     const saved = json['saved'] as Array<Record<string, unknown>>
     expect(String(saved[0]?.['relative'])).toBe('proj/08_上传/poster.png')
     // Written through landing, so the project index records it too.
-    const index = await readFile(join(root, '.assets', 'proj', 'assets-index.md'), 'utf8')
+    const index = await readFile(join(root, 'proj', 'assets-index.md'), 'utf8')
     expect(index).toContain('poster.png')
     // An upload answers relative paths only, like every other listing here.
     expect(JSON.stringify(json)).not.toContain(root)

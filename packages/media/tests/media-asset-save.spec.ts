@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -7,8 +7,16 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registerMediaAssetSave } from '../src/tools/media-asset-save.ts'
+import { createTempAssetsRoot } from './temp-assets.ts'
 
 const testToolSignal = new AbortController().signal
+
+// The asset root is process-wide now, so this spec claims it and lands there.
+const assets = createTempAssetsRoot('roubaai-asset-save-')
+let assetsDir = ''
+
+beforeEach(() => { assetsDir = assets.install() })
+afterEach(async () => { await assets.restore() })
 
 /** Minimal jobs registry (mirrors tools.spec.ts). */
 class StubJobs {
@@ -69,14 +77,14 @@ describe('media_asset_save tool', () => {
     } as never)
     expect(result.isError).toBe(false)
     const value = result.value as { target?: string }
-    expect(value.target).toContain('.assets\\测试项目\\character\\小美\\服装\\礼服.png')
+    expect(value.target).toContain('测试项目\\character\\小美\\服装\\礼服.png')
 
     // 等后台 job 完成，验证文件与索引落盘
     await jobs.hooks[0]!.done
     const target = value.target!
     expect(existsSync(target)).toBe(true)
     expect(readFileSync(target).toString()).toBe('fake-png-bytes')
-    const indexPath = join(ws, '.assets', '测试项目', 'assets-index.md')
+    const indexPath = join(assetsDir, '测试项目', 'assets-index.md')
     expect(existsSync(indexPath)).toBe(true)
     expect(readFileSync(indexPath, 'utf8')).toContain('小美/服装/礼服')
   })
@@ -155,12 +163,12 @@ describe('media_asset_save tool', () => {
     } as never)
     expect(result.isError).toBe(false)
     const value = result.value as { target?: string }
-    expect(value.target).toContain('.assets\\测试项目\\01_角色\\CH001_花十\\02_定稿图\\CH001_花十_本体.png')
+    expect(value.target).toContain('测试项目\\01_角色\\CH001_花十\\02_定稿图\\CH001_花十_本体.png')
 
     await jobs.hooks[0]!.done
     expect(existsSync(value.target!)).toBe(true)
     // assets-index 仍记录 category 语义标签
-    const indexPath = join(ws, '.assets', '测试项目', 'assets-index.md')
+    const indexPath = join(assetsDir, '测试项目', 'assets-index.md')
     expect(readFileSync(indexPath, 'utf8')).toContain('| character |')
   })
 

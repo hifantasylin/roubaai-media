@@ -9,6 +9,7 @@ import { MediaRuntimeLocal, VideoProvider } from '../src/index.ts'
 import type { ProviderProbeResult, VideoCaps, VideoGenerateInput, VideoGenerationResult, VideoTaskHandle, VideoTaskPoll } from '../src/index.ts'
 import { OPENAI_FACADE_PREFIX, handleOpenAiRequest } from '../src/openai-facade.ts'
 import { registerLocalMedia } from '../src/media-cache.ts'
+import { createTempAssetsRoot } from './temp-assets.ts'
 import { boundaryOf, fileFields, parseMultipart, textField } from '../src/multipart.ts'
 
 const VIDEOS = `${OPENAI_FACADE_PREFIX}/v1/videos`
@@ -54,11 +55,12 @@ class StubVideoProvider extends VideoProvider {
 }
 
 let scratch = ''
+const assets = createTempAssetsRoot('roubaai-video-')
 beforeAll(async () => {
-  scratch = await mkdtemp(join(tmpdir(), 'roubaai-video-'))
+  scratch = assets.install()
 })
 afterAll(async () => {
-  await rm(scratch, { recursive: true, force: true })
+  await assets.restore()
 })
 
 async function boot(options: { normalizer?: boolean } = {}): Promise<{ ctx: Context; provider: StubVideoProvider }> {
@@ -82,7 +84,7 @@ function fakeRequest(options: { method?: string; headers?: Record<string, string
   const body = options.body ?? Buffer.alloc(0)
   return {
     method: options.method ?? 'POST',
-    headers: { 'x-roubaai-workspace': scratch, ...options.headers },
+    headers: { ...options.headers },
     on(event: string, listener: (arg?: unknown) => void) {
       if (event === 'data') listener(body)
       if (event === 'end') setImmediate(() => listener())
@@ -208,7 +210,7 @@ describe('openai facade: video tasks', () => {
     expect(String(second.json['url'])).toContain('/api/roubaai-media/media')
     const info = second.json['roubaai'] as Record<string, unknown>
     expect(info['landed']).toBe(true)
-    expect(String(info['assetPath'])).toContain(join('.assets', 'default', '05_视频片段'))
+    expect(String(info['assetPath'])).toContain(join(scratch, 'default', '05_视频片段'))
   })
 
   it('states that reference images need the public-reference tunnel when the host has none', async () => {

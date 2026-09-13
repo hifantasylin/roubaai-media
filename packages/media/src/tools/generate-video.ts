@@ -19,9 +19,9 @@ import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import type { VideoCaps, VideoGenerateInput, VideoGenerationResult, VideoTaskPoll } from '../provider.ts'
 import { readActiveAdapter } from '../settings-lookup.ts'
-import { appendMediaCost } from '../cost-ledger.ts'
+import { appendMediaCost, DEFAULT_PROJECT } from '../cost-ledger.ts'
 import { downloadToCache } from '../media-cache.ts'
-import { workspaceOf } from './media-asset-save.ts'
+import { assetsRoot } from '../asset-root.ts'
 
 export const name = 'generate_video'
 
@@ -244,7 +244,7 @@ export function registerGenerateVideo(ctx: Context): () => void {
                 // costUsd, fall back to the rate-table estimate. A ledger write
                 // failure must never fail the generation itself.
                 try {
-                  const workspace = workspaceOf(exec.agent)
+                  const assets = assetsRoot()
                   const reported = (result.providerMeta as { costUsd?: unknown } | undefined)?.costUsd
                   const reportedUsd = typeof reported === 'number' && Number.isFinite(reported) ? reported : undefined
                   const estimated = provider.estimateCostUsd(
@@ -252,11 +252,11 @@ export function registerGenerateVideo(ctx: Context): () => void {
                     input.duration ?? DEFAULT_DURATION,
                     args.resolution ?? '720p',
                   )
-                  await appendMediaCost(workspace, {
+                  await appendMediaCost(assets, {
                     ts: Date.now(),
                     tool: 'video',
                     model: result.providerMeta?.model ?? provider.defaultModel,
-                    project: args.project ?? workspace,
+                    project: args.project ?? DEFAULT_PROJECT,
                     ...args.label !== undefined ? { label: args.label } : {},
                     spec: `${input.duration ?? DEFAULT_DURATION}s×${args.resolution ?? '720p'}`,
                     costUsd: reportedUsd ?? estimated ?? 0,

@@ -57,7 +57,8 @@ export type {
 export type { MediaRuntime } from './service.ts'
 export { NoProviderError, MediaRuntimeLocal } from './media-local.ts'
 export { OPENAI_FACADE_PREFIX, registerOpenAiRoutes, mapImageRequest } from './openai-facade.ts'
-export { ASSETS_ROUTE_PREFIX, registerAssetRoutes, resolveAssetPath } from './asset-routes.ts'
+export { ASSETS_ROUTE_PREFIX, registerAssetRoutes } from './asset-routes.ts'
+export { ASSETS_DIR_NAME, assetsRoot, resolveAssetPath, stagingRoot } from './asset-root.ts'
 export { ASSET_CATEGORIES, landMediaAsset, resolveLandingPath } from './asset-landing.ts'
 export { MEDIA_ROUTE_PREFIX, registerWebRoutes } from './media-cache.ts'
 

@@ -22,6 +22,7 @@ import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { extname, isAbsolute, normalize, join, relative } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
+import { stagingRoot } from './asset-root.ts'
 
 /** Local static-server port in front of the tunnel. */
 const STATIC_PORT = Number(process.env.DSH_MEDIA_STATIC_PORT ?? 8765)
@@ -100,12 +101,12 @@ export class MediaUrlNormalizer extends Service {
       return `${base}/_proxy/${encodeURIComponent(absolute)}`
     }
     if (isLocalPath(ref)) {
-      // Local file path: serve it from the fixed workspace root through the
-      // tunnel's static file route. The root is set server-side (first
-      // startup) and never taken from the URL, so the public tunnel can only
-      // read files under the current workspace.
+      // Local file path: serve it from the fixed staging root through the
+      // tunnel's static file route. The root is set server-side (first startup)
+      // and never taken from the URL, so the public tunnel can only read files
+      // under the directory the asset library lives in.
       const base = await this.ensureStarted(workspaceRoot)
-      const root = this.root ?? workspaceRoot ?? process.cwd()
+      const root = this.root ?? workspaceRoot ?? stagingRoot()
       return `${base}/_local/${this.toPublicPath(ref, root)}`
     }
     return ref
@@ -119,12 +120,12 @@ export class MediaUrlNormalizer extends Service {
   /**
    * Lazily start the static server + tunnel and return the cached tunnel
    * base URL. Concurrent callers share a single startup promise. The first
-   * call pins the workspace root that `/_local/...` serves from.
+   * call pins the root that `/_local/...` serves from.
    */
   private ensureStarted(workspaceRoot?: string): Promise<string> {
     if (this.baseUrl !== undefined) return Promise.resolve(this.baseUrl)
     if (this.starting !== undefined) return this.starting
-    this.root = workspaceRoot ?? process.cwd()
+    this.root = workspaceRoot ?? stagingRoot()
     this.starting = this.start()
     return this.starting
   }

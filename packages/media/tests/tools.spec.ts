@@ -1,14 +1,15 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { MediaRuntimeLocal } from '../src/index.ts'
 import { ImageProvider, VideoProvider } from '../src/index.ts'
-import { ledgerPath } from '../src/cost-ledger.ts'
+import { DEFAULT_PROJECT, ledgerPath } from '../src/cost-ledger.ts'
+import { createTempAssetsRoot } from './temp-assets.ts'
 import { registerGenerateImage } from '../src/tools/generate-image.ts'
 import { registerGenerateVideo } from '../src/tools/generate-video.ts'
 import type {
@@ -24,6 +25,13 @@ import type {
 } from '../src/index.ts'
 
 const testToolSignal = new AbortController().signal
+
+// The ledger is written under the process-wide asset root, so this spec claims it.
+const assets = createTempAssetsRoot('roubaai-tools-')
+let assetsDir = ''
+
+beforeEach(() => { assetsDir = assets.install() })
+afterEach(async () => { await assets.restore() })
 
 /** A recorded image provider that returns a canned result. */
 class StubImageProvider extends ImageProvider {
@@ -192,7 +200,7 @@ describe('generate_image tool', () => {
         callId: ToolCallId('img-1'),
         name: 'generate_image',
         arguments: { prompt: 'a red panda', resolution: '2K' },
-        // The completed job appends the cost ledger under the agent's cwd.
+        // The completed job appends the cost ledger under the asset root.
         agent: { session: { header: { cwd: workspace } } } as never,
       })
 
@@ -255,7 +263,7 @@ describe('generate_image tool', () => {
       })
       await jobs.hooks[0]!.done
 
-      const lines = (await readFile(ledgerPath(workspace, workspace), 'utf8'))
+      const lines = (await readFile(ledgerPath(assetsDir, DEFAULT_PROJECT), 'utf8'))
         .split('\n')
         .filter(line => line.trim().length > 0)
       expect(lines).toHaveLength(1)

@@ -30,8 +30,8 @@ import type {
   ImageGenerationResult, ImageGenerateInput, ImageProvider, ImageRunInfo, MediaModelCapability, MediaModelInfo,
 } from '../provider.ts'
 import { MEDIA_SETTINGS_NAMESPACE, readActiveAdapter, readActiveMediaProvider } from '../settings-lookup.ts'
-import { appendMediaCost } from '../cost-ledger.ts'
-import { workspaceOf } from './media-asset-save.ts'
+import { appendMediaCost, DEFAULT_PROJECT } from '../cost-ledger.ts'
+import { assetsRoot } from '../asset-root.ts'
 
 export const name = 'generate_image'
 
@@ -301,7 +301,7 @@ export function registerGenerateImage(ctx: Context): () => void {
               // resolution. A ledger write failure must never fail the
               // generation itself.
               try {
-                const workspace = workspaceOf(exec.agent)
+                const assets = assetsRoot()
                 // The model the generation actually ran: an explicit override
                 // (a caller-named model) beats the provider's configured
                 // model, which itself beats its default. Reading `defaultModel`
@@ -309,11 +309,11 @@ export function registerGenerateImage(ctx: Context): () => void {
                 // another model.
                 const model = result.providerMeta?.model ?? provider.defaultModel
                 const costUsd = provider.estimateCostUsd(model, run.tier ?? '1K')
-                await appendMediaCost(workspace, {
+                await appendMediaCost(assets, {
                   ts: Date.now(),
                   tool: 'image',
                   model,
-                  project: args.project ?? workspace,
+                  project: args.project ?? DEFAULT_PROJECT,
                   ...args.label !== undefined ? { label: args.label } : {},
                   spec: run.tier ?? '1K',
                   costUsd: costUsd ?? 0,

@@ -1,5 +1,5 @@
 /**
- * Landing media into the workspace asset tree (`<workspace>/.assets/<project>/…`).
+ * Landing media into the user's asset tree (`<assetsRoot>/<project>/…`).
  *
  * The single source of truth for where an asset goes and what its index row says.
  * The `media_asset_save` tool and the OpenAI facade both land through here, so a
@@ -7,7 +7,7 @@
  * path rules, categories, or the index format.
  *
  * Path rules, inherited from the tool: `name` and `dir` are relative sub-paths
- * under `<workspace>/.assets/<project>/`; a `..` segment, a drive letter or a
+ * under `<assetsRoot>/<project>/`; a `..` segment, a drive letter or a
  * leading slash is refused rather than sanitized, because a caller that tries to
  * escape the tree is not a caller whose intent we should guess.
  *
@@ -45,8 +45,8 @@ export function isAssetCategory(value: string): value is AssetCategory {
 
 /** One landing request: where the bytes go and how the index describes them. */
 export interface LandRequest {
-  /** Workspace root; the tree lives in `<workspace>/.assets`. */
-  readonly workspace: string
+  /** The asset root; the project directory is a child of it. */
+  readonly assetsRoot: string
   /** Project folder name under `.assets/`. */
   readonly project: string
   /** Sub-directory under the project, e.g. `01_角色/CH001_花十/02_定稿图`. */
@@ -94,7 +94,7 @@ function assertRelative(value: string, label: string, tool: string): string {
  * @returns the file path plus the sanitized name, directory and project root.
  */
 export function resolveLandingPath(
-  options: Pick<LandRequest, 'workspace' | 'project' | 'dir' | 'name' | 'ext'>,
+  options: Pick<LandRequest, 'assetsRoot' | 'project' | 'dir' | 'name' | 'ext'>,
   tool = 'asset_landing',
 ): { filePath: string; projectDir: string; safeName: string; safeDir: string } {
   const safeName = assertRelative(options.name, 'name', tool)
@@ -102,7 +102,7 @@ export function resolveLandingPath(
   if (/\.\./.test(options.project) || /^[a-zA-Z]:[\\/]/.test(options.project) || options.project.startsWith('/')) {
     throw new Error(`${tool}: project must be a relative folder name without \`..\` or drive letters`)
   }
-  const projectDir = join(options.workspace, '.assets', options.project)
+  const projectDir = join(options.assetsRoot, options.project)
   return { filePath: join(projectDir, safeDir, `${safeName}.${options.ext}`), projectDir, safeName, safeDir }
 }
 

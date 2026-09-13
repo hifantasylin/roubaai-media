@@ -1,5 +1,5 @@
 /**
- * Read-only routes over the workspace asset tree (`<root>/.assets/**`).
+ * Read-only routes over the user's asset tree (`<assetsRoot>/**`).
  *
  * The canvas workbench is a browser app: it can display a URL, not a path. These
  * routes are what turn the asset tree into URLs — list a directory, list the
@@ -9,15 +9,11 @@
  * the filesystem from the browser.
  *
  * The tree is the only thing exposed, and only below it: every request path is
- * resolved against `<root>/.assets` and refused when it leaves that directory,
+ * resolved against the asset root and refused when it leaves that directory,
  * so `..`, an absolute path or a drive letter never reaches the filesystem. The
  * listing answers with relative paths only — an absolute path is the one thing
  * the canvas deliberately keeps out of anything it sends to a model, and this
  * route has no reason to hand one out.
- *
- * Root resolution: `DSH_MEDIA_ASSETS_ROOT`, else the host's working directory.
- * One root per process is enough for a desktop host, which serves one workspace
- * at a time; a caller that needs another passes the configured root.
  *
  * @module @roubaai/media/asset-routes
  */
@@ -25,12 +21,17 @@
 import { createReadStream } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { dirname, extname, isAbsolute, join, resolve, sep } from 'node:path'
+import { extname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 // Type-only: pulls the webServer Context augmentation (ctx.webServer).
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { landMediaAsset, type LandedAsset } from './asset-landing.ts'
+import { assetsRoot, resolveAssetPath } from './asset-root.ts'
 import { fileFields, parseMultipart, textField } from './multipart.ts'
+
+// The root resolver lives in one module so the routes, the tools and the landing
+// path cannot drift apart; this re-export keeps the package's import surface.
+export { assetsRoot, resolveAssetPath } from './asset-root.ts'
 
 /**
  * Route prefix on the host webserver.
@@ -105,26 +106,8 @@ function kindOf(ext: string): MediaKind {
   return 'other'
 }
 
-/** The directory this process serves: `<root>/.assets`. */
-export function assetsRoot(): string {
-  const root = process.env['DSH_MEDIA_ASSETS_ROOT'] ?? process.cwd()
-  return join(resolve(root), '.assets')
-}
+/** The directory this process serves, resolved in one place for every path. */
 
-/**
- * Resolve a request path inside the asset root, or undefined when it escapes.
- * @param requested - the caller's relative path (empty means the root itself).
- * @returns the absolute path, or undefined when the request is not confined.
- */
-export function resolveAssetPath(requested: string): string | undefined {
-  if (requested.includes('\0')) return undefined
-  const cleaned = requested.replace(/^[\\/]+/, '')
-  if (isAbsolute(cleaned) || /^[a-zA-Z]:/.test(cleaned)) return undefined
-  const root = assetsRoot()
-  const target = resolve(root, cleaned)
-  const prefix = root.endsWith(sep) ? root : root + sep
-  return target === root || target.startsWith(prefix) ? target : undefined
-}
 
 function sendJson(res: ServerResponse, status: number, value: unknown): void {
   const body = Buffer.from(JSON.stringify(value), 'utf8')
@@ -175,6 +158,7 @@ async function serveTree(res: ServerResponse, requested: string): Promise<void> 
   const dirents = await readdir(target, { withFileTypes: true })
   const entries: Array<Record<string, unknown>> = []
   for (const dirent of dirents.slice(0, MAX_ENTRIES)) {
+    if (dirent.name.startsWith('.')) continue
     const relativePath = requested === '' ? dirent.name : `${requested.replace(/\/+$/, '')}/${dirent.name}`
     if (dirent.isDirectory()) {
       entries.push({ name: dirent.name, path: relativePath, dir: true })
@@ -281,7 +265,7 @@ async function landUpload(project: string, dir: string, filename: string, bytes:
   const ext = extname(filename).replace(/^\./, '').toLowerCase() || 'bin'
   const name = filename.slice(0, filename.length - extname(filename).length) || 'asset'
   return await landMediaAsset({
-    workspace: dirname(assetsRoot()),
+    assetsRoot: assetsRoot(),
     project,
     dir,
     name,
@@ -394,6 +378,8 @@ async function collectLibraryFiles(
   }
   for (const dirent of dirents) {
     if (out.length >= MAX_LIBRARY_FILES) return
+    // A hidden entry is bookkeeping or transport (`.roubaai-refs`), not an asset.
+    if (dirent.name.startsWith('.')) continue
     const relative = `${prefix}/${dirent.name}`
     if (dirent.isDirectory()) {
       await collectLibraryFiles(join(dir, dirent.name), project, relative, depth - 1, out)
@@ -441,7 +427,7 @@ async function serveLibrary(res: ServerResponse): Promise<void> {
   const files: LibraryFile[] = []
   const projects: LibraryProject[] = []
   for (const dirent of dirents.slice(0, MAX_ENTRIES)) {
-    if (!dirent.isDirectory()) continue
+    if (!dirent.isDirectory() || dirent.name.startsWith('.')) continue
     const before = files.length
     await collectLibraryFiles(join(root, dirent.name), dirent.name, dirent.name, MAX_LIBRARY_DEPTH, files)
     const own = files.slice(before)

@@ -23,9 +23,9 @@ import type { GenericCallView, ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import type { MusicGenerateInput, MusicGenerationResult } from '../provider.ts'
 import { readActiveAdapter } from '../settings-lookup.ts'
-import { appendMediaCost } from '../cost-ledger.ts'
+import { appendMediaCost, DEFAULT_PROJECT } from '../cost-ledger.ts'
 import { downloadToCache } from '../media-cache.ts'
-import { workspaceOf } from './media-asset-save.ts'
+import { assetsRoot } from '../asset-root.ts'
 
 export const name = 'generate_music'
 
@@ -216,12 +216,12 @@ export function registerGenerateMusic(ctx: Context): () => void {
                   // zero USD placeholder; the owner converts points themselves.
                   // A ledger write failure must never fail the generation.
                   try {
-                    const workspace = workspaceOf(exec.agent)
-                    await appendMediaCost(workspace, {
+                    const assets = assetsRoot()
+                    await appendMediaCost(assets, {
                       ts: Date.now(),
                       tool: 'music',
                       model: args.model ?? provider.defaultModel,
-                      project: args.project ?? workspace,
+                      project: args.project ?? DEFAULT_PROJECT,
                       ...args.label !== undefined ? { label: args.label } : {},
                       spec: track.durationSeconds !== undefined ? `${Math.round(track.durationSeconds)}s` : 'music',
                       costUsd: 0,

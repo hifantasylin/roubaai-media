@@ -36,36 +36,50 @@ export interface MediaCostEntry {
 
 
 /**
- * Ledger file for one project: `<workspace>/.assets/<project>/media-cost.jsonl`.
- * A missing project — or one that is actually the workspace path itself (the
- * generate tools fall back to the workspace when the model omits `project`) —
- * falls back to `<workspace>/.assets/default/media-cost.jsonl`, so the
- * workspace's cost data stays in the workspace `.assets` tree under the
- * `default` project rather than under a mangled absolute-path directory.
+ * Ledger file for one project: `<assetsRoot>/<project>/media-cost.jsonl`.
+ * A missing project — or one that is actually an absolute path, which no project
+ * name is — falls back to `<assetsRoot>/default/media-cost.jsonl`, so a run that
+ * names no project still records its cost under `default` rather than under a
+ * mangled absolute-path directory.
+ * @param assetsRoot - the asset root, resolved by `asset-root`.
+ * @param project - the project folder name, or undefined for the default.
+ * @returns the absolute ledger path.
  */
-export function ledgerPath(workspace: string, project: string | undefined): string {
-  // Only a relative project name (e.g. `奇幻超人`) is a real project directory;
-  // an absent value or an absolute path (the workspace fallback) is unscoped.
+export function ledgerPath(assetsRoot: string, project: string | undefined): string {
   const dir = project === undefined || project.length === 0 || isAbsolute(project)
-    ? 'default'
+    ? DEFAULT_PROJECT
     : project.replace(/[\\/:*?"<>|]/g, '_')
-  return join(workspace, '.assets', dir, 'media-cost.jsonl')
+  return join(assetsRoot, dir, 'media-cost.jsonl')
 }
 
-/** True when the same (project, label) already exists in the ledger. */
-export async function isRetry(workspace: string, project: string, label: string | undefined): Promise<boolean> {
+/** The project a run without one is recorded under. */
+export const DEFAULT_PROJECT = 'default'
+
+/**
+ * True when the same (project, label) already exists in the ledger.
+ * @param assetsRoot - the asset root.
+ * @param project - the project folder name.
+ * @param label - the run label, when the caller gave one.
+ * @returns whether this exact run already happened.
+ */
+export async function isRetry(assetsRoot: string, project: string, label: string | undefined): Promise<boolean> {
   if (label === undefined) return false
-  const entries = await readLedger(workspace, project)
+  const entries = await readLedger(assetsRoot, project)
   return entries.some(entry => entry.project === project && entry.label === label)
 }
 
-/** Append one completion record; `retry` is computed automatically. Returns the full record. */
+/**
+ * Append one completion record; `retry` is computed automatically.
+ * @param assetsRoot - the asset root.
+ * @param entry - the record, without its computed `retry` flag.
+ * @returns the complete record.
+ */
 export async function appendMediaCost(
-  workspace: string,
+  assetsRoot: string,
   entry: Omit<MediaCostEntry, 'retry'>,
 ): Promise<MediaCostEntry> {
-  const full: MediaCostEntry = { ...entry, retry: await isRetry(workspace, entry.project, entry.label) }
-  const filePath = ledgerPath(workspace, entry.project)
+  const full: MediaCostEntry = { ...entry, retry: await isRetry(assetsRoot, entry.project, entry.label) }
+  const filePath = ledgerPath(assetsRoot, entry.project)
   await mkdir(dirname(filePath), { recursive: true })
   await appendFile(filePath, `${JSON.stringify(full)}\n`, 'utf8')
   return full
@@ -91,16 +105,18 @@ async function readLedgerFile(filePath: string): Promise<MediaCostEntry[]> {
 
 /**
  * Read ledger entries. With a project, reads only that project's file
- * (`<workspace>/.assets/<project>/media-cost.jsonl`); without one, scans every
- * project directory under `.assets/` (including `default`) so a workspace-wide
- * summary folds all projects together.
+ * (`<assetsRoot>/<project>/media-cost.jsonl`); without one, scans every project
+ * directory under the asset root (including `default`) so a user-wide summary
+ * folds all projects together.
+ * @param assetsRoot - the asset root.
+ * @param project - the project folder name, or undefined for every project.
+ * @returns the recorded entries.
  */
-export async function readLedger(workspace: string, project?: string): Promise<MediaCostEntry[]> {
-  if (project !== undefined) return readLedgerFile(ledgerPath(workspace, project))
-  const assetsDir = join(workspace, '.assets')
+export async function readLedger(assetsRoot: string, project?: string): Promise<MediaCostEntry[]> {
+  if (project !== undefined) return readLedgerFile(ledgerPath(assetsRoot, project))
   let dirs: string[]
   try {
-    dirs = (await readdir(assetsDir, { withFileTypes: true }))
+    dirs = (await readdir(assetsRoot, { withFileTypes: true }))
       .filter(dirent => dirent.isDirectory())
       .map(dirent => dirent.name)
   } catch {
@@ -108,7 +124,7 @@ export async function readLedger(workspace: string, project?: string): Promise<M
   }
   const all: MediaCostEntry[] = []
   for (const dir of dirs) {
-    all.push(...await readLedgerFile(join(assetsDir, dir, 'media-cost.jsonl')))
+    all.push(...await readLedgerFile(join(assetsRoot, dir, 'media-cost.jsonl')))
   }
   return all
 }
@@ -133,12 +149,17 @@ export interface MediaCostSummary {
   byTool: Array<{ tool: MediaCostEntry['tool']; count: number; totalUsd: number }>
 }
 
-/** Fold the ledger into a summary (newest label first). */
+/**
+ * Fold the ledger into a summary (newest label first).
+ * @param assetsRoot - the asset root.
+ * @param filter - optional project and time window.
+ * @returns the folded summary.
+ */
 export async function summarizeMediaCost(
-  workspace: string,
+  assetsRoot: string,
   filter?: { project?: string; since?: number },
 ): Promise<MediaCostSummary> {
-  const all = await readLedger(workspace, filter?.project)
+  const all = await readLedger(assetsRoot, filter?.project)
   const entries = all.filter(entry =>
     (filter?.since === undefined || entry.ts >= filter.since),
   )
