@@ -3,10 +3,11 @@
  *
  * The canvas workbench is a browser app: it can display a URL, not a path. These
  * routes are what turn the asset trees into URLs — list a directory, list the
- * whole library, serve a file, accept an upload — so a canvas node can show an
- * image or a video straight out of `.assets` instead of importing a second copy
- * into browser storage, and the canvas' asset library can browse projects
- * without walking the filesystem from the browser.
+ * whole library, serve a file, accept an upload, and move, rename or remove what
+ * is already there — so a canvas node can show an image or a video straight out
+ * of `.assets` instead of importing a second copy into browser storage, and the
+ * canvas' asset library can browse and tidy projects without walking the
+ * filesystem from the browser.
  *
  * A request names the session it belongs to and the tree it addresses; the
  * session's workspace is resolved host-side (a caller-supplied path would make
@@ -20,13 +21,19 @@
  * deliberately keeps out of anything it sends to a model, and these routes have
  * no reason to hand one out.
  *
+ * The write routes never rewrite `assets-index.md`: that file is an append-only
+ * record of what landed and where it came from, and the tree itself is what a
+ * library reads. A moved or renamed asset therefore keeps its landing row, which
+ * is what the canvas' detail panel shows it as.
+ *
  * @module @roubaai/media/asset-routes
  */
 
 import { createReadStream } from 'node:fs'
-import { readdir, stat } from 'node:fs/promises'
+import type { Stats } from 'node:fs'
+import { mkdir, readdir, rename, rm, stat, unlink } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { extname, join } from 'node:path'
+import { basename, dirname, extname, join, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 // Type-only: pulls the webServer Context augmentation (ctx.webServer).
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -56,6 +63,12 @@ const BLUEPRINTS_PATH = '/blueprints'
 const LIBRARY_PATH = '/library'
 /** Accepts uploaded files into a project. */
 const UPLOAD_PATH = '/upload'
+/** Moves an entry to another relative path in the same tree. */
+const MOVE_PATH = '/move'
+/** Renames one entry in place. */
+const RENAME_PATH = '/rename'
+/** Removes one file, or one directory the caller marks recursive. */
+const DELETE_PATH = '/delete'
 /** Where an upload lands when the caller does not say. */
 const DEFAULT_UPLOAD_DIR = '08_上传'
 
@@ -66,6 +79,8 @@ const ROOT_PARAM = 'root'
 
 /** Most bytes one upload request may carry. */
 const MAX_UPLOAD_BYTES = 256 * 1024 * 1024
+/** Most bytes one edit request's JSON body may carry; these carry paths, not files. */
+const MAX_EDIT_BYTES = 64 * 1024
 /** The file a project's blueprint lives in. */
 const BLUEPRINT_FILE = 'canvas-blueprint.json'
 
@@ -241,11 +256,12 @@ async function serveBlueprints(res: ServerResponse, root: AssetRoot): Promise<vo
 }
 
 /**
- * Read a request body, refusing anything past the upload cap.
+ * Read a request body, refusing anything past `limit`.
  * @param req - the incoming request.
+ * @param limit - most bytes to accept.
  * @returns the body bytes, or undefined when it is missing, failed, or oversized.
  */
-async function readBody(req: IncomingMessage): Promise<Buffer | undefined> {
+async function readBody(req: IncomingMessage, limit = MAX_UPLOAD_BYTES): Promise<Buffer | undefined> {
   return await new Promise<Buffer | undefined>((resolve) => {
     const chunks: Buffer[] = []
     let size = 0
@@ -257,7 +273,7 @@ async function readBody(req: IncomingMessage): Promise<Buffer | undefined> {
     }
     req.on('data', (chunk: Buffer) => {
       size += chunk.length
-      if (size > MAX_UPLOAD_BYTES) {
+      if (size > limit) {
         finish(undefined)
         return
       }
@@ -536,6 +552,208 @@ async function serveFile(req: IncomingMessage, res: ServerResponse, root: AssetR
   createReadStream(target, { start: range.start, end: range.end }).pipe(res)
 }
 
+/** The refusal every write route shares: a mount is not ours to edit. */
+function refuseReadOnly(res: ServerResponse): void {
+  sendJson(res, 403, { ok: false, error: 'this library is read-only; import the file into the current project instead' })
+}
+
+/**
+ * Read an edit request's JSON body.
+ *
+ * These carry paths, not files, so the cap is small: a body past it is a client
+ * bug or a probe, and neither deserves to be buffered.
+ * @param req - the incoming request.
+ * @returns the parsed object, or undefined when the body is absent, oversized, malformed, or not an object.
+ */
+async function readJsonObject(req: IncomingMessage): Promise<Record<string, unknown> | undefined> {
+  const body = await readBody(req, MAX_EDIT_BYTES)
+  if (body === undefined || body.length === 0) return undefined
+  try {
+    const parsed: unknown = JSON.parse(body.toString('utf8'))
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * One required relative path from a body.
+ * @param body - the parsed body.
+ * @param key - the field to read.
+ * @returns the trimmed value, or undefined when it is missing, blank, or not a string.
+ */
+function relativeField(body: Record<string, unknown>, key: string): string | undefined {
+  const value = body[key]
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  return trimmed === '' ? undefined : trimmed
+}
+
+/**
+ * A path as the caller named it: relative to the root, always with `/`.
+ * @param root - the tree the path belongs to.
+ * @param absolute - the confined absolute path.
+ * @returns the relative path, in the vocabulary every answer uses.
+ */
+function relativeTo(root: AssetRoot, absolute: string): string {
+  return absolute.slice(root.path.length).replace(/^[\\/]+/, '').split(sep).join('/')
+}
+
+/**
+ * `stat`, with a missing path as undefined rather than a throw.
+ * @param path - the path to inspect.
+ * @returns its stats, or undefined when it is not there.
+ */
+async function statOrUndefined(path: string): Promise<Stats | undefined> {
+  try {
+    return await stat(path)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Move one entry to another relative path in the same tree.
+ *
+ * A `to` that names an existing directory means "into there" — the shape a
+ * library's drag-and-drop produces — and the destination's parent is created
+ * when it is missing, so filing an asset into a project that has no such folder
+ * yet is one call. Nothing is overwritten: an existing destination is a
+ * conflict, not a merge.
+ * @param res - the response to write.
+ * @param root - the tree the request named.
+ * @param body - the parsed request body.
+ */
+async function serveMove(res: ServerResponse, root: AssetRoot, body: Record<string, unknown>): Promise<void> {
+  const from = relativeField(body, 'from')
+  const to = relativeField(body, 'to')
+  if (from === undefined || to === undefined) {
+    sendJson(res, 400, { ok: false, error: 'from and to are required' })
+    return
+  }
+  const source = resolveInRoot(root.path, from)
+  const target = resolveInRoot(root.path, to)
+  if (source === undefined || target === undefined) {
+    sendJson(res, 400, { ok: false, error: 'from and to must stay inside the asset root' })
+    return
+  }
+  const info = await statOrUndefined(source)
+  if (info === undefined) {
+    sendJson(res, 404, { ok: false, error: `not found: ${relativeTo(root, source)}` })
+    return
+  }
+  const intoDirectory = (await statOrUndefined(target))?.isDirectory() === true
+  const destination = intoDirectory ? join(target, basename(source)) : target
+  if (destination === source) {
+    sendJson(res, 400, { ok: false, error: 'from and to are the same path' })
+    return
+  }
+  if (info.isDirectory() && destination.startsWith(source + sep)) {
+    sendJson(res, 400, { ok: false, error: 'cannot move a directory inside itself' })
+    return
+  }
+  if (await statOrUndefined(destination) !== undefined) {
+    sendJson(res, 409, { ok: false, error: `destination exists: ${relativeTo(root, destination)}` })
+    return
+  }
+  try {
+    await mkdir(dirname(destination), { recursive: true })
+    await rename(source, destination)
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) })
+    return
+  }
+  sendJson(res, 200, { ok: true, root: root.id, from: relativeTo(root, source), to: relativeTo(root, destination) })
+}
+
+/**
+ * Rename one entry in place.
+ * @param res - the response to write.
+ * @param root - the tree the request named.
+ * @param body - the parsed request body.
+ */
+async function serveRename(res: ServerResponse, root: AssetRoot, body: Record<string, unknown>): Promise<void> {
+  const relative = relativeField(body, 'path')
+  const name = relativeField(body, 'name')
+  if (relative === undefined || name === undefined) {
+    sendJson(res, 400, { ok: false, error: 'path and name are required' })
+    return
+  }
+  // A rename is one entry's name, not a second way to move a file.
+  if (name.includes('/') || name.includes('\\') || name === '.' || name === '..') {
+    sendJson(res, 400, { ok: false, error: 'name must be a single entry name without a separator' })
+    return
+  }
+  const source = resolveInRoot(root.path, relative)
+  if (source === undefined) {
+    sendJson(res, 400, { ok: false, error: 'path must stay inside the asset root' })
+    return
+  }
+  if (await statOrUndefined(source) === undefined) {
+    sendJson(res, 404, { ok: false, error: `not found: ${relativeTo(root, source)}` })
+    return
+  }
+  const destination = join(dirname(source), name)
+  if (destination === source) {
+    sendJson(res, 400, { ok: false, error: 'the name is unchanged' })
+    return
+  }
+  if (await statOrUndefined(destination) !== undefined) {
+    sendJson(res, 409, { ok: false, error: `destination exists: ${relativeTo(root, destination)}` })
+    return
+  }
+  try {
+    await rename(source, destination)
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) })
+    return
+  }
+  sendJson(res, 200, { ok: true, root: root.id, from: relativeTo(root, source), to: relativeTo(root, destination) })
+}
+
+/**
+ * Remove one file, or one directory the caller marks recursive.
+ *
+ * A directory is refused without `recursive: true` on purpose: a library's
+ * delete usually means one asset, and removing a whole project because the click
+ * landed on a folder is not a mistake worth making quietly.
+ * @param res - the response to write.
+ * @param root - the tree the request named.
+ * @param body - the parsed request body.
+ */
+async function serveDelete(res: ServerResponse, root: AssetRoot, body: Record<string, unknown>): Promise<void> {
+  const relative = relativeField(body, 'path') ?? ''
+  if (relative === '') {
+    sendJson(res, 400, { ok: false, error: 'path is required, and may not be the tree root' })
+    return
+  }
+  const target = resolveInRoot(root.path, relative)
+  if (target === undefined || target === root.path) {
+    sendJson(res, 400, { ok: false, error: 'path must stay inside the asset root' })
+    return
+  }
+  const info = await statOrUndefined(target)
+  if (info === undefined) {
+    sendJson(res, 404, { ok: false, error: `not found: ${relativeTo(root, target)}` })
+    return
+  }
+  const directory = info.isDirectory()
+  if (directory && body['recursive'] !== true) {
+    sendJson(res, 409, { ok: false, error: 'deleting a directory needs recursive: true' })
+    return
+  }
+  try {
+    if (directory) await rm(target, { recursive: true, force: false })
+    else await unlink(target)
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) })
+    return
+  }
+  sendJson(res, 200, { ok: true, root: root.id, path: relativeTo(root, target), kind: directory ? 'directory' : 'file' })
+}
+
 /**
  * Answer one asset request.
  * @param req - the incoming request.
@@ -566,6 +784,25 @@ export async function handleAssetsRequest(
       return
     }
     await serveUpload(req, res, named)
+    return
+  }
+  if (path === MOVE_PATH || path === RENAME_PATH || path === DELETE_PATH) {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { ok: false, error: `${path} takes POST` })
+      return
+    }
+    if (!named.writable) {
+      refuseReadOnly(res)
+      return
+    }
+    const body = await readJsonObject(req)
+    if (body === undefined) {
+      sendJson(res, 400, { ok: false, error: 'expected a JSON object body' })
+      return
+    }
+    if (path === MOVE_PATH) await serveMove(res, named, body)
+    else if (path === RENAME_PATH) await serveRename(res, named, body)
+    else await serveDelete(res, named, body)
     return
   }
   if (req.method !== 'GET' && req.method !== 'HEAD') {

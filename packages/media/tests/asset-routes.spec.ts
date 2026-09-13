@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -334,5 +334,134 @@ describe('asset routes: file', () => {
   it('answers 404 for a missing file', async () => {
     const { status } = await get('/file?path=proj/missing.png')
     expect(status).toBe(404)
+  })
+})
+
+describe('asset routes: edits', () => {
+  /** Send one JSON edit request, optionally against a named tree for a session. */
+  async function edit(
+    path: string,
+    body: unknown,
+    options: { session?: string; root?: string; workspace?: string } = {},
+  ): Promise<{ status: number; json: Record<string, unknown> }> {
+    const res = fakeResponse()
+    const request = new Readable({
+      read() {
+        this.push(Buffer.from(JSON.stringify(body)))
+        this.push(null)
+      },
+    })
+    Object.assign(request, { method: 'POST', headers: { 'content-type': 'application/json' } })
+    const query = new URLSearchParams()
+    if (options.session !== undefined) query.set('session', options.session)
+    if (options.root !== undefined) query.set('root', options.root)
+    const suffix = query.size === 0 ? '' : `?${query.toString()}`
+    await handleAssetsRequest(
+      request as unknown as IncomingMessage,
+      res as unknown as ServerResponse,
+      new URL(`${ASSETS_ROUTE_PREFIX}${path}${suffix}`, 'http://127.0.0.1:3080'),
+      () => options.workspace,
+    )
+    const text = Buffer.concat(res.chunks).toString('utf8')
+    return { status: res.status, json: text === '' ? {} : JSON.parse(text) as Record<string, unknown> }
+  }
+
+  /** Whether a path is on disk. */
+  async function present(path: string): Promise<boolean> {
+    try {
+      await stat(path)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  it('moves a file to the path the caller names', async () => {
+    const { status, json } = await edit('/move', { from: 'proj/clip.mp4', to: 'proj/09_文本/clip.mp4' })
+    expect(status).toBe(200)
+    expect(json['to']).toBe('proj/09_文本/clip.mp4')
+    expect(await present(join(root, 'proj', '09_文本', 'clip.mp4'))).toBe(true)
+    expect(await present(join(root, 'proj', 'clip.mp4'))).toBe(false)
+  })
+
+  it('moves a file into a directory when the destination names one', async () => {
+    const { status, json } = await edit('/move', { from: 'proj/clip.mp4', to: 'proj/01_角色' })
+    expect(status).toBe(200)
+    expect(json['to']).toBe('proj/01_角色/clip.mp4')
+  })
+
+  it('refuses a move that escapes the tree, and one onto something that is there', async () => {
+    const escaped = await edit('/move', { from: 'proj/clip.mp4', to: '../outside.mp4' })
+    expect(escaped.status).toBe(400)
+    const clash = await edit('/move', { from: 'proj/clip.mp4', to: 'proj/01_角色/a.png' })
+    expect(clash.status).toBe(409)
+    // A refused move leaves the asset where it was.
+    expect(await present(join(root, 'proj', 'clip.mp4'))).toBe(true)
+  })
+
+  it('refuses to move a directory inside itself', async () => {
+    const { status } = await edit('/move', { from: 'proj/01_角色', to: 'proj/01_角色/nested' })
+    expect(status).toBe(400)
+  })
+
+  it('renames one entry in place', async () => {
+    const { status, json } = await edit('/rename', { path: 'proj/clip.mp4', name: 'renamed.mp4' })
+    expect(status).toBe(200)
+    expect(json['to']).toBe('proj/renamed.mp4')
+    expect(await present(join(root, 'proj', 'renamed.mp4'))).toBe(true)
+    expect(await present(join(root, 'proj', 'clip.mp4'))).toBe(false)
+  })
+
+  it('refuses a rename that carries a separator or lands on an existing entry', async () => {
+    const separator = await edit('/rename', { path: 'proj/clip.mp4', name: 'sub/clip.mp4' })
+    expect(separator.status).toBe(400)
+    const clash = await edit('/rename', { path: 'proj/clip.mp4', name: '01_角色' })
+    expect(clash.status).toBe(409)
+    expect(await present(join(root, 'proj', 'clip.mp4'))).toBe(true)
+  })
+
+  it('removes one file', async () => {
+    const { status, json } = await edit('/delete', { path: 'proj/clip.mp4' })
+    expect(status).toBe(200)
+    expect(json['kind']).toBe('file')
+    expect(await present(join(root, 'proj', 'clip.mp4'))).toBe(false)
+  })
+
+  it('refuses a directory without recursive, then removes it with recursive', async () => {
+    const guarded = await edit('/delete', { path: 'proj/01_角色' })
+    expect(guarded.status).toBe(409)
+    expect(String(guarded.json['error'])).toContain('recursive')
+    expect(await present(join(root, 'proj', '01_角色', 'a.png'))).toBe(true)
+
+    const removed = await edit('/delete', { path: 'proj/01_角色', recursive: true })
+    expect(removed.status).toBe(200)
+    expect(removed.json['kind']).toBe('directory')
+    expect(await present(join(root, 'proj', '01_角色'))).toBe(false)
+  })
+
+  it('refuses the tree root and a path that is not there', async () => {
+    expect((await edit('/delete', { path: '' })).status).toBe(400)
+    expect((await edit('/delete', { path: 'proj/nothing.png' })).status).toBe(404)
+    expect((await edit('/rename', { path: 'proj/nothing.png', name: 'x.png' })).status).toBe(404)
+    expect((await edit('/move', { from: 'proj/nothing.png', to: 'proj/x.png' })).status).toBe(404)
+  })
+
+  it('refuses every edit against a mounted library', async () => {
+    const options = { session: 's1', root: 'global', workspace: root }
+    const moved = await edit('/move', { from: 'proj/clip.mp4', to: 'proj/x.mp4' }, options)
+    const renamed = await edit('/rename', { path: 'proj/clip.mp4', name: 'x.mp4' }, options)
+    const removed = await edit('/delete', { path: 'proj/clip.mp4' }, options)
+    for (const answer of [moved, renamed, removed]) {
+      expect(answer.status).toBe(403)
+      expect(String(answer.json['error'])).toContain('read-only')
+    }
+    expect(await present(join(root, 'proj', 'clip.mp4'))).toBe(true)
+  })
+
+  it('takes POST only, and a JSON object body', async () => {
+    expect((await get('/move')).status).toBe(405)
+    const notAnObject = await edit('/delete', 'proj/clip.mp4')
+    expect(notAnObject.status).toBe(400)
+    expect(String(notAnObject.json['error'])).toContain('JSON object')
   })
 })
