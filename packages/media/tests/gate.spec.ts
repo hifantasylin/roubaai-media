@@ -139,12 +139,18 @@ describe.skipIf(!hasReal)('checkGate against a real project manifest', () => {
 
 const PROMPT = '# U01\n\n```\n一个最小提示词\n```\n'
 
-/** A project holding one unit's prompt, with a ledger when asked for one. */
-async function unitFixture(options: { prompt?: string; ledger?: unknown }): Promise<string> {
+/** A project holding one unit's artifacts, with a ledger when asked for one. */
+async function unitFixture(options: { prompt?: string | null; unitFile?: string; ledger?: unknown }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'gate-unit-'))
   const dir = join(root, '演示项目')
-  await mkdir(join(dir, 'prompts'), { recursive: true })
-  await writeFile(join(dir, 'prompts', 'U01.md'), options.prompt ?? PROMPT)
+  if (options.prompt !== null) {
+    await mkdir(join(dir, 'prompts'), { recursive: true })
+    await writeFile(join(dir, 'prompts', 'U01.md'), options.prompt ?? PROMPT)
+  }
+  if (options.unitFile !== undefined) {
+    await mkdir(join(dir, '分镜', '单元'), { recursive: true })
+    await writeFile(join(dir, '分镜', '单元', 'U01.md'), options.unitFile)
+  }
   if (options.ledger !== undefined) {
     await mkdir(join(dir, '.gates'), { recursive: true })
     await writeFile(join(dir, '.gates', 'l0.json'), JSON.stringify(options.ledger))
@@ -172,11 +178,15 @@ describe('the L0 stamp half of the gate', () => {
     expect(unitOf({ kind: 'video', assetsRoot: '/x', label: 'U09_x', unit: 'u13' })).toBe('U13')
   })
 
-  it('refuses a prompt that exists but was never stamped', async () => {
+  it('refuses a prompt that exists but was never stamped, and hands over the command', async () => {
     const root = await unitFixture({})
     const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
     expect(decision.allow).toBe(false)
     expect(decision.allow === false && decision.reason).toContain('没有 L0 单子')
+    // A refusal is a route: the way out has to be in the message, not just the
+    // fact that something is missing.
+    expect(decision.allow === false && decision.reason).toContain('check-prompt.mjs')
+    expect(decision.allow === false && decision.reason).toContain('--stamp')
   })
 
   it('refuses a prompt edited after it was stamped', async () => {
@@ -191,6 +201,15 @@ describe('the L0 stamp half of the gate', () => {
     const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
     expect(decision.allow).toBe(false)
     expect(decision.allow === false && decision.reason).toContain('1 个 ERROR')
+    expect(decision.allow === false && decision.reason).toContain('--stamp')
+  })
+
+  it('names the storyboard checker when the missing stamp is on the unit file', async () => {
+    const root = await unitFixture({ prompt: null, unitFile: '# U01\n' })
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(false)
+    expect(decision.allow === false && decision.reason).toContain('分镜/单元/U01.md')
+    expect(decision.allow === false && decision.reason).toContain('check-unit.mjs')
   })
 
   it('admits a clean, current stamp', async () => {

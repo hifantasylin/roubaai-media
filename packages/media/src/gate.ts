@@ -27,7 +27,9 @@
  */
 
 import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { readFile, readdir } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 /** The generation kinds the gate guards. */
@@ -180,6 +182,33 @@ async function unitFiles(projectDir: string, unit: string): Promise<readonly str
   return found
 }
 
+/** Which L0 script covers a project-relative artifact. */
+function scriptFor(rel: string): 'check-prompt.mjs' | 'check-unit.mjs' {
+  return rel.startsWith('prompts/') ? 'check-prompt.mjs' : 'check-unit.mjs'
+}
+
+/**
+ * The exact command that would satisfy this refusal.
+ *
+ * A refusal is worth nothing if the way out is not obvious, and this gate is
+ * not here to be a wall — it is here to put the model back on the process it
+ * was supposed to be following. Handing over the literal command makes the
+ * correct next step cheaper than any way around it, which is the only kind of
+ * pressure this design relies on.
+ *
+ * The path is resolved from `$DSH_HOME` rather than written out: where a skill
+ * lives differs per machine.
+ * @param rel - the project-relative artifact that needs a stamp.
+ * @returns a copy-pasteable command line.
+ */
+function stampCommand(rel: string): string {
+  const script = scriptFor(rel)
+  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  const tool = join(home, 'skills', 'roubaai-video-skill', 'references', 'tools', script)
+  const path = existsSync(tool) ? `"${tool}"` : `<roubaai-video-skill>/references/tools/${script}`
+  return `node ${path} "${rel}" --stamp`
+}
+
 /**
  * The L0 half of the gate: a shot may only be paid for once the prompt and the
  * storyboard unit behind it passed the mechanical gate **in the version that is
@@ -190,6 +219,15 @@ async function unitFiles(projectDir: string, unit: string): Promise<readonly str
  * unit not written yet, has nothing to review, and refusing those would block
  * the start of every project. What is refused is the case this ledger exists
  * for: the file is there, and no current clean stamp covers it.
+ *
+ * The ledger is an ordinary file, so a model could in principle write one
+ * instead of running the check. It has no reason to: forging means computing
+ * the file's hash and knowing this schema, where complying is one command — and
+ * every refusal prints that command. Guarding against forgery would cost a
+ * cross-repository coupling and defend against a motive nothing here creates;
+ * the failures this is built for are an invented route and a skipped step, not
+ * a lie about work done. So the effort goes into making the way back obvious
+ * instead.
  * @param projectDir - the project directory under the asset root.
  * @param unit - the unit id to look up.
  * @returns a refusal, or undefined when there is nothing to refuse.
@@ -204,22 +242,23 @@ async function checkUnitStamps(projectDir: string, unit: string): Promise<GateDe
     if (stamp === undefined) {
       return {
         allow: false,
-        reason: `generate_video: ${rel} 没有 L0 单子 —— 这一版没跑过闸门，拒绝。`
-          + `请先跑 check-prompt.mjs / check-unit.mjs 并加 --stamp。`,
+        reason: `generate_video: ${rel} 还没有 L0 单子 —— 这一版没跑过闸门，拒绝。\n`
+          + `先跑一遍再提交：\n  ${stampCommand(rel)}`,
       }
     }
     const current = sha256(await readFile(join(projectDir, rel), 'utf8'))
     if (current !== stamp.sha256) {
       return {
         allow: false,
-        reason: `generate_video: ${rel} 改过之后没有重跑 L0（单子上的指纹对不上现在这一版）—— 拒绝。`
-          + `重跑闸门并加 --stamp 再提交。`,
+        reason: `generate_video: ${rel} 改过之后没有重跑 L0（单子上的指纹对不上现在这一版）—— 拒绝。\n`
+          + `重跑一遍再提交：\n  ${stampCommand(rel)}`,
       }
     }
     if (stamp.errors.length > 0) {
       return {
         allow: false,
-        reason: `generate_video: ${rel} 的 L0 单子有 ${stamp.errors.length} 个 ERROR —— 拒绝。先改到 0 ERROR 再提交。`,
+        reason: `generate_video: ${rel} 的 L0 单子有 ${stamp.errors.length} 个 ERROR —— 拒绝。\n`
+          + `先跑这条看是哪几条、改到 0 ERROR：\n  ${stampCommand(rel)}`,
       }
     }
   }
