@@ -7,6 +7,9 @@ dist/
 # Repo-local pnpm store, used when the machine-wide store cannot be trusted.
 .pnpm-store/
 
+# Scratch: pack/verify workspaces and diff dumps. Never an artifact.
+.temp/
+
 # Electron/crashpad diagnostics written into the cwd by tool shims.
 debug.log
 
