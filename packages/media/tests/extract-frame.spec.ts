@@ -4,7 +4,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { mkdtempSync, readFileSync, existsSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { registerExtractFrame } from '../src/tools/extract-frame.ts'
@@ -12,9 +12,11 @@ import { registerExtractFrame } from '../src/tools/extract-frame.ts'
 const testToolSignal = new AbortController().signal
 
 
+/** WinGet drops shims under the *current* user's AppData; never spell that user out. */
+const wingetLink = (binary: string): string => join(homedir(), 'AppData', 'Local', 'Microsoft', 'WinGet', 'Links', binary)
 /** 探测 ffmpeg/ffprobe（PATH 或 WinGet 安装位），注入 FFMPEG_BIN/FFPROBE_BIN 供工具复用。 */
 const ffprobeBin = (): string | undefined => {
-  const candidates = [process.env.FFPROBE_BIN, 'C:/Users/Administrator/AppData/Local/Microsoft/WinGet/Links/ffprobe.exe', 'ffprobe']
+  const candidates = [process.env.FFPROBE_BIN, wingetLink('ffprobe.exe'), 'ffprobe']
   for (const c of candidates) {
     if (c === undefined) continue
     if (spawnSync(c, ['-version'], { timeout: 5000, encoding: 'utf8' }).status === 0) return c
@@ -22,7 +24,7 @@ const ffprobeBin = (): string | undefined => {
   return undefined
 }
 const ffmpegBin = (): string | undefined => {
-  const candidates = [process.env.FFMPEG_BIN, 'C:/Users/Administrator/AppData/Local/Microsoft/WinGet/Links/ffmpeg.exe', 'ffmpeg']
+  const candidates = [process.env.FFMPEG_BIN, wingetLink('ffmpeg.exe'), 'ffmpeg']
   for (const c of candidates) {
     if (c === undefined) continue
     if (spawnSync(c, ['-version'], { timeout: 5000, encoding: 'utf8' }).status === 0) return c

@@ -20,6 +20,7 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { extname, isAbsolute, normalize, join, relative } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { stagingRoot } from './asset-root.ts'
@@ -28,10 +29,17 @@ import { stagingRoot } from './asset-root.ts'
 const STATIC_PORT = Number(process.env.DSH_MEDIA_STATIC_PORT ?? 8765)
 /** DSH host base URL used to resolve host-local `/...` reference routes. */
 const HOST_BASE = (process.env.DSH_MEDIA_HOST ?? 'http://127.0.0.1:3080').replace(/\/$/, '')
+/**
+ * The DSH home. Read from the environment because a profile can live outside
+ * the OS user's home directory; `homedir()` only covers a host that does not
+ * set it. Never spell the user name out: it differs on every machine, and a
+ * baked-in one silently breaks every install but the author's.
+ */
+const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh')
 /** Path to the cloudflared binary shipped with the remote web gateway plugin. */
 const CLOUDFLARED_BIN =
   process.env.DSH_MEDIA_CLOUDFLARED_BIN
-  ?? 'C:/Users/Administrator/.dsh/plugins/dsh-remote-web-gateway/bin/cache/cloudflared.exe'
+  ?? join(DSH_HOME, 'plugins', 'dsh-remote-web-gateway', 'bin', 'cache', 'cloudflared.exe')
 
 /** MIME map served by the static server (extended with common media types). */
 const MIME: Record<string, string> = {
