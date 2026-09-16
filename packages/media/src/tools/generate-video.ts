@@ -170,6 +170,18 @@ export function registerGenerateVideo(ctx: Context): () => void {
       render: (_args, value) => [{ type: 'text', text: `Started background video job ${value.jobId} (task ${value.taskId})` }],
     },
     async execute(args, exec) {
+      // The money boundary, and the first thing that can refuse. It sits ahead
+      // of provider resolution on purpose: whether this project may spend on
+      // this shot is a policy question, and hanging it off whichever backend
+      // happens to be installed would let a deployment with an unconfigured
+      // adapter skip the gate entirely. See ../gate.ts.
+      const gate = await checkGate({
+        kind: 'video',
+        project: args.project,
+        label: args.label,
+        assetsRoot: primaryAssetsRoot(workspaceOfAgent(exec.agent)),
+      })
+      if (!gate.allow) throw new Error(gate.reason)
       // Route through the backend the Settings page activated for video. An
       // unconfigured deployment names none, and keeps whatever single provider
       // its composition registered — the behavior it has always had.
@@ -195,15 +207,6 @@ export function registerGenerateVideo(ctx: Context): () => void {
         ...args.callbackUrl !== undefined ? { callbackUrl: args.callbackUrl } : {},
         ...args.watermark !== undefined ? { watermark: args.watermark } : {},
       }
-      // The money boundary: the last check before `submit` bills the provider.
-      // A refusal throws here, so no task is created and nothing is charged.
-      const gate = await checkGate({
-        kind: 'video',
-        project: args.project,
-        label: args.label,
-        assetsRoot: primaryAssetsRoot(workspaceOfAgent(exec.agent)),
-      })
-      if (!gate.allow) throw new Error(gate.reason)
       const handle = await provider.submit(input, exec.signal)
       // Once the job id is published, work is owned by the task's own
       // cancellation signal, decoupled from `exec.signal`.

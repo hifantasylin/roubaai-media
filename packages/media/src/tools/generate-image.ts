@@ -266,6 +266,19 @@ export function registerGenerateImage(ctx: Context): () => void {
       if (args.prompt.trim().length === 0) {
         throw new Error('generate_image: prompt must be a non-empty string')
       }
+      // The money boundary, and the first thing that can refuse. It sits ahead
+      // of provider resolution on purpose: whether this project may spend on
+      // this asset is a policy question, and hanging it off whichever backend
+      // happens to be installed would let a deployment with an unconfigured
+      // adapter skip the gate entirely — which is exactly what a live run hit.
+      // See ../gate.ts.
+      const gate = await checkGate({
+        kind: 'image',
+        project: args.project,
+        label: args.label,
+        assetsRoot: primaryAssetsRoot(workspaceOfAgent(exec.agent)),
+      })
+      if (!gate.allow) throw new Error(gate.reason)
       // Route through the backend the Settings page activated for images. An
       // unconfigured deployment names none, and keeps whatever single provider
       // its composition registered — the behavior it has always had.
@@ -285,16 +298,6 @@ export function registerGenerateImage(ctx: Context): () => void {
         ...run.tier === undefined ? {} : { resolution: run.tier },
         ...args.quality !== undefined ? { quality: args.quality } : {},
       }
-      // The money boundary, and deliberately the last thing before the job
-      // exists: a refusal here cannot leave a queued task behind. See ../gate.ts
-      // for why this is a plugin check and not a line in a skill.
-      const gate = await checkGate({
-        kind: 'image',
-        project: args.project,
-        label: args.label,
-        assetsRoot: primaryAssetsRoot(workspaceOfAgent(exec.agent)),
-      })
-      if (!gate.allow) throw new Error(gate.reason)
       // `gate.note` records why a call was allowed without being matched against
       // a plan. It is deliberately not folded into the job label: that label is
       // a stable contract the specs and the job listings already depend on.
