@@ -27,9 +27,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync } from 'node:fs'
 import { readFile, readdir } from 'node:fs/promises'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 /** The generation kinds the gate guards. */
@@ -182,33 +180,6 @@ async function unitFiles(projectDir: string, unit: string): Promise<readonly str
   return found
 }
 
-/** Which L0 script covers a project-relative artifact. */
-function scriptFor(rel: string): 'check-prompt.mjs' | 'check-unit.mjs' {
-  return rel.startsWith('prompts/') ? 'check-prompt.mjs' : 'check-unit.mjs'
-}
-
-/**
- * The exact command that would satisfy this refusal.
- *
- * A refusal is worth nothing if the way out is not obvious, and this gate is
- * not here to be a wall — it is here to put the model back on the process it
- * was supposed to be following. Handing over the literal command makes the
- * correct next step cheaper than any way around it, which is the only kind of
- * pressure this design relies on.
- *
- * The path is resolved from `$DSH_HOME` rather than written out: where a skill
- * lives differs per machine.
- * @param rel - the project-relative artifact that needs a stamp.
- * @returns a copy-pasteable command line.
- */
-function stampCommand(rel: string): string {
-  const script = scriptFor(rel)
-  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
-  const tool = join(home, 'skills', 'roubaai-video-skill', 'references', 'tools', script)
-  const path = existsSync(tool) ? `"${tool}"` : `<roubaai-video-skill>/references/tools/${script}`
-  return `node ${path} "${rel}" --stamp`
-}
-
 /**
  * The L0 half of the gate: a shot may only be paid for once the prompt and the
  * storyboard unit behind it passed the mechanical gate **in the version that is
@@ -220,14 +191,10 @@ function stampCommand(rel: string): string {
  * the start of every project. What is refused is the case this ledger exists
  * for: the file is there, and no current clean stamp covers it.
  *
- * The ledger is an ordinary file, so a model could in principle write one
- * instead of running the check. It has no reason to: forging means computing
- * the file's hash and knowing this schema, where complying is one command — and
- * every refusal prints that command. Guarding against forgery would cost a
- * cross-repository coupling and defend against a motive nothing here creates;
- * the failures this is built for are an invented route and a skipped step, not
- * a lie about work done. So the effort goes into making the way back obvious
- * instead.
+ * A refusal is one line plus a pointer, never an explanation: the reader has
+ * the skill loaded, so naming the rule that failed and the document that states
+ * it is enough for the next step to be obvious. Spelling out the procedure here
+ * would duplicate `00-gates.md` and rot the moment it changes.
  * @param projectDir - the project directory under the asset root.
  * @param unit - the unit id to look up.
  * @returns a refusal, or undefined when there is nothing to refuse.
@@ -240,49 +207,18 @@ async function checkUnitStamps(projectDir: string, unit: string): Promise<GateDe
   for (const rel of files) {
     const stamp = stamps[rel]
     if (stamp === undefined) {
-      return {
-        allow: false,
-        reason:
-          `generate_video 被拒：${rel} 这一版还没跑过 L0 闸门。\n`
-          + `\n`
-          + `L0 是免费的机械体检（字数 / 光影 8 项 / 表演 7 项 / 台词 / 切片连续性，见 00-gates.md）。\n`
-          + `花钱生成之前必须先过它——没有它的结果，闸门无法确认这一版是合格的。\n`
-          + `\n`
-          + `跑这一条，它会打印 ERROR 清单并记下这次的结果：\n`
-          + `  ${stampCommand(rel)}\n`
-          + `\n`
-          + `有 ERROR 就改到 0，然后重新提交这次 generate_video。`,
-      }
+      return { allow: false, reason: `generate_video 被拒：${rel} 还没过 L0 闸门。参考 00-gates.md。` }
     }
     const current = sha256(await readFile(join(projectDir, rel), 'utf8'))
     if (current !== stamp.sha256) {
-      return {
-        allow: false,
-        reason:
-          `generate_video 被拒：${rel} 在跑过 L0 之后又被改动过。\n`
-          + `\n`
-          + `上次 L0 的结果对应的是改动前的内容，已经不适用——现在这一版没有体检过。\n`
-          + `\n`
-          + `重跑这一条：\n`
-          + `  ${stampCommand(rel)}\n`
-          + `\n`
-          + `确认 0 ERROR 后，重新提交这次 generate_video。`,
-      }
+      return { allow: false, reason: `generate_video 被拒：${rel} 过了 L0 之后又改过，没重跑。参考 00-gates.md。` }
     }
     if (stamp.errors.length > 0) {
-      const shown = stamp.errors.slice(0, 5).map(e => `  - ${e}`).join('\n')
-      const more = stamp.errors.length > 5 ? `\n  …还有 ${stamp.errors.length - 5} 条` : ''
+      const heads = stamp.errors.slice(0, 3).map(e => e.split(/[：:]/)[0]).join('、')
+      const rest = stamp.errors.length > 3 ? ' 等' : ''
       return {
         allow: false,
-        reason:
-          `generate_video 被拒：${rel} 的 L0 结果里有 ${stamp.errors.length} 个 ERROR，花钱之前必须清零：\n`
-          + `\n`
-          + `${shown}${more}\n`
-          + `\n`
-          + `改完重跑这一条（会重新体检并更新结果）：\n`
-          + `  ${stampCommand(rel)}\n`
-          + `\n`
-          + `然后重新提交这次 generate_video。`,
+        reason: `generate_video 被拒：${rel} 的 L0 有 ${stamp.errors.length} 个 ERROR（${heads}${rest}）。参考 00-gates.md。`,
       }
     }
   }
@@ -326,24 +262,11 @@ export async function checkGate(request: GateRequest): Promise<GateDecision> {
     const named = labelIds(request.label ?? '')
     const unknown = named.filter(id => !ids.has(id))
     if (unknown.length > 0) {
-      // A key-frame id is not a random miss — it is the one shape that has a
-      // right answer instead of a route, so say it rather than let the model
-      // try to justify adding it.
-      const asFirstFrame = unknown.some(id => id.startsWith('KF') || id.startsWith('FF'))
+      // The rule is quoted from the document it cites, not paraphrased: a
+      // refusal that says something the reference does not is worse than none.
       return {
         allow: false,
-        reason:
-          `${kind} 被拒：资产清单里没有「${unknown.join('、')}」这一项。\n`
-          + `\n`
-          + `项目「${project}」的资产清单共 ${ids.size} 项，都与它不匹配。清单外的图不生成——\n`
-          + `它不在这个项目的计划里。\n`
-          + `\n`
-          + (asFirstFrame
-            ? `· 如果它是首帧：首帧不用生成。从上一镜的成片抽尾帧即可（media_extract_frame，免费，\n`
-              + `  而且天然接得上——生成的首帧跟上一镜尾帧不可能一致，必然跳变）。\n`
-            : '')
-          + `· 如果确实需要这个资产：从上游加起——先改讲戏本里的资产清单、重新出清单，再生成。\n`
-          + `  不能只在这里生成一张清单上没有的图。`,
+        reason: `${kind} 被拒：资产清单里没有 ${unknown.join('、')}，未列入的不生成。参考 05-asset-library.md。`,
       }
     }
     if (named.length === 0) notes.push('label 未标明资产编号')

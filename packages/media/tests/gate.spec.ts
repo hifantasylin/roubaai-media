@@ -80,8 +80,13 @@ describe('checkGate', () => {
       kind: 'image', assetsRoot: root, project: '演示项目', label: 'KF03_格3_奶奶出门',
     })
     expect(decision.allow).toBe(false)
-    expect(decision.allow === false && decision.reason).toContain('KF03')
-    expect(decision.allow === false && decision.reason).toContain('清单共 5 项')
+    const reason = decision.allow === false ? decision.reason : ''
+    expect(reason).toContain('KF03')
+    // The rule is quoted from the document it cites, so the reader can go read
+    // it rather than take the gate's word for it.
+    expect(reason).toContain('未列入的不生成')
+    expect(reason).toContain('参考 05-asset-library.md')
+    expect(reason.split('\n')).toHaveLength(1)
   })
 
   it('reports every unknown id at once', async () => {
@@ -178,47 +183,48 @@ describe('the L0 stamp half of the gate', () => {
     expect(unitOf({ kind: 'video', assetsRoot: '/x', label: 'U09_x', unit: 'u13' })).toBe('U13')
   })
 
-  it('refuses a prompt that exists but was never stamped, and hands over the command', async () => {
+  it('refuses a prompt that exists but was never stamped, and cites the document', async () => {
     const root = await unitFixture({})
     const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
     expect(decision.allow).toBe(false)
     const reason = decision.allow === false ? decision.reason : ''
-    // A refusal is a route: it has to say what is missing, why it matters, and
-    // the literal command that resolves it -- readable without this conversation.
-    expect(reason).toContain('还没跑过 L0 闸门')
-    expect(reason).toContain('check-prompt.mjs')
-    expect(reason).toContain('--stamp')
-    expect(reason).toContain('重新提交')
+    // One line plus a pointer, readable without this conversation: naming the
+    // rule that failed and the document that states it. The procedure itself
+    // lives in that document, so repeating it here would only rot.
+    expect(reason).toContain('还没过 L0 闸门')
+    expect(reason).toContain('参考 00-gates.md')
     expect(reason).not.toContain('单子')
+    expect(reason.split('\n')).toHaveLength(1)
   })
 
   it('refuses a prompt edited after it was stamped', async () => {
     const root = await unitFixture({ prompt: `${PROMPT}\n改了一句。\n`, ledger: ledgerFor('prompts/U01.md', PROMPT) })
     const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
     expect(decision.allow).toBe(false)
-    expect(decision.allow === false && decision.reason).toContain('又被改动过')
-    expect(decision.allow === false && decision.reason).toContain('--stamp')
+    const reason = decision.allow === false ? decision.reason : ''
+    expect(reason).toContain('没重跑')
+    expect(reason).toContain('参考 00-gates.md')
   })
 
-  it('refuses a stamp that recorded an ERROR, and shows the errors themselves', async () => {
+  it('refuses a stamp that recorded an ERROR, naming the failed checks', async () => {
     const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT, ['光影 8 项缺 8 项', '表演 7 项缺 7 项']) })
     const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
     expect(decision.allow).toBe(false)
     const reason = decision.allow === false ? decision.reason : ''
     expect(reason).toContain('2 个 ERROR')
-    // The findings travel with the refusal, so the fix does not need a re-run
-    // just to find out what is wrong.
+    // Which checks failed, not what they said: enough to know where to look.
     expect(reason).toContain('光影 8 项缺 8 项')
     expect(reason).toContain('表演 7 项缺 7 项')
-    expect(reason).toContain('--stamp')
+    expect(reason).toContain('参考 00-gates.md')
   })
 
-  it('names the storyboard checker when the missing stamp is on the unit file', async () => {
+  it('names the storyboard file when that is the artifact that is missing a stamp', async () => {
     const root = await unitFixture({ prompt: null, unitFile: '# U01\n' })
     const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
     expect(decision.allow).toBe(false)
-    expect(decision.allow === false && decision.reason).toContain('分镜/单元/U01.md')
-    expect(decision.allow === false && decision.reason).toContain('check-unit.mjs')
+    const reason = decision.allow === false ? decision.reason : ''
+    expect(reason).toContain('分镜/单元/U01.md')
+    expect(reason).toContain('参考 00-gates.md')
   })
 
   it('admits a clean, current stamp', async () => {
