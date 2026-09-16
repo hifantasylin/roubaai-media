@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { checkGate, labelIds, manifestIds } from '../src/gate.ts'
+import { checkGate, labelIds, manifestIds, unitOf } from '../src/gate.ts'
 
 /** A project directory holding a manifest, built fresh per test. */
 async function fixtureProject(manifest: string): Promise<string> {
@@ -133,5 +134,80 @@ describe.skipIf(!hasReal)('checkGate against a real project manifest', () => {
     })
     expect(decision.allow).toBe(false)
     expect(decision.allow === false && decision.reason).toContain('KF03')
+  })
+})
+
+const PROMPT = '# U01\n\n```\n一个最小提示词\n```\n'
+
+/** A project holding one unit's prompt, with a ledger when asked for one. */
+async function unitFixture(options: { prompt?: string; ledger?: unknown }): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'gate-unit-'))
+  const dir = join(root, '演示项目')
+  await mkdir(join(dir, 'prompts'), { recursive: true })
+  await writeFile(join(dir, 'prompts', 'U01.md'), options.prompt ?? PROMPT)
+  if (options.ledger !== undefined) {
+    await mkdir(join(dir, '.gates'), { recursive: true })
+    await writeFile(join(dir, '.gates', 'l0.json'), JSON.stringify(options.ledger))
+  }
+  return root
+}
+
+/** A ledger recording one clean stamp for `rel` over `text`. */
+function ledgerFor(rel: string, text: string, errors: readonly string[] = []): unknown {
+  return {
+    version: 1,
+    stamps: {
+      [rel]: { sha256: createHash('sha256').update(text, 'utf8').digest('hex'), errors, warns: [], chars: 1, tool: 'check-prompt.mjs', ts: 1 },
+    },
+  }
+}
+
+describe('the L0 stamp half of the gate', () => {
+  it('reads the unit from the label when no argument names one', async () => {
+    expect(unitOf({ kind: 'video', assetsRoot: '/x', label: 'U09_厨房空镜' })).toBe('U09')
+    expect(unitOf({ kind: 'video', assetsRoot: '/x', label: '开场空镜' })).toBeUndefined()
+  })
+
+  it('lets an explicit unit argument win over the label', () => {
+    expect(unitOf({ kind: 'video', assetsRoot: '/x', label: 'U09_x', unit: 'u13' })).toBe('U13')
+  })
+
+  it('refuses a prompt that exists but was never stamped', async () => {
+    const root = await unitFixture({})
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(false)
+    expect(decision.allow === false && decision.reason).toContain('没有 L0 单子')
+  })
+
+  it('refuses a prompt edited after it was stamped', async () => {
+    const root = await unitFixture({ prompt: `${PROMPT}\n改了一句。\n`, ledger: ledgerFor('prompts/U01.md', PROMPT) })
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(false)
+    expect(decision.allow === false && decision.reason).toContain('改过之后没有重跑 L0')
+  })
+
+  it('refuses a stamp that recorded an ERROR', async () => {
+    const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT, ['光影 8 项缺 8 项']) })
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(false)
+    expect(decision.allow === false && decision.reason).toContain('1 个 ERROR')
+  })
+
+  it('admits a clean, current stamp', async () => {
+    const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT) })
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(true)
+  })
+
+  it('leaves a unit with no file alone, so a project without this layout still generates', async () => {
+    const root = await unitFixture({})
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U13' })
+    expect(decision.allow).toBe(true)
+  })
+
+  it('does not look for stamps when the call is not a video', async () => {
+    const root = await unitFixture({})
+    const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: 'U01_x' })
+    expect(decision.allow).toBe(true)
   })
 })

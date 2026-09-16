@@ -26,6 +26,7 @@
  * @module @roubaai/media/gate
  */
 
+import { createHash } from 'node:crypto'
 import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 
@@ -40,6 +41,8 @@ export interface GateRequest {
   readonly project?: string | undefined
   /** The shot or asset identifier (`label` tool argument). */
   readonly label?: string | undefined
+  /** The unit this shot belongs to, when the caller names it outright. */
+  readonly unit?: string | undefined
   /** The writable asset root holding `<project>/` directories. */
   readonly assetsRoot: string
 }
@@ -112,6 +115,117 @@ async function findManifest(projectDir: string): Promise<string | undefined> {
   return named.length === 0 ? undefined : join(projectDir, named[0]!)
 }
 
+/** Where the L0 gate writes its ledger, relative to the project directory. */
+const STAMP_FILE = '.gates/l0.json'
+
+/**
+ * Where a unit's two artifacts live, relative to the project directory. This
+ * mirrors the layout the skill's text-asset single source declares, and is a
+ * short explicit list rather than a walk of the project: the gate reads only
+ * what it is looking for.
+ */
+const UNIT_DIRS = ['prompts', '分镜/单元'] as const
+
+/** One recorded L0 result, bound to the hash of the file it ran against. */
+interface Stamp {
+  readonly sha256: string
+  readonly errors: readonly string[]
+  readonly tool: string
+}
+
+/**
+ * The unit a call names: an explicit argument wins, else the label's id.
+ *
+ * The bounds are lookarounds, not `\b`: a label routinely glues the id to a
+ * separator (`U09_厨房空镜`), and `_` is a word character — so a trailing `\b`
+ * silently fails to match exactly the labels this is here to read. The same
+ * mistake already cost the asset-id scan once.
+ */
+export function unitOf(request: GateRequest): string | undefined {
+  const explicit = request.unit?.trim()
+  if (explicit !== undefined && explicit !== '') return explicit.toUpperCase()
+  return /(?<![A-Za-z0-9])U\d{2,3}(?!\d)/iu.exec(request.label ?? '')?.[0].toUpperCase()
+}
+
+/** The content hash the skill scripts record, computed from the same text. */
+function sha256(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
+/** The L0 ledger's stamps, keyed by project-relative POSIX path. */
+async function readStamps(projectDir: string): Promise<Record<string, Stamp>> {
+  try {
+    const parsed = JSON.parse(await readFile(join(projectDir, STAMP_FILE), 'utf8')) as { stamps?: Record<string, Stamp> }
+    return parsed.stamps ?? {}
+  } catch {
+    return {} // 还没跑过 --stamp，或台账被改坏：当作一条都没有
+  }
+}
+
+/** Every artifact of one unit that exists on disk, project-relative POSIX. */
+async function unitFiles(projectDir: string, unit: string): Promise<readonly string[]> {
+  const found: string[] = []
+  const prefix = unit.toLowerCase()
+  for (const dir of UNIT_DIRS) {
+    let entries: string[]
+    try {
+      entries = await readdir(join(projectDir, dir))
+    } catch {
+      continue // 这个项目没有这一类产物
+    }
+    for (const entry of entries.filter(name => name.toLowerCase().startsWith(prefix) && name.endsWith('.md')).sort()) {
+      found.push(`${dir}/${entry}`)
+    }
+  }
+  return found
+}
+
+/**
+ * The L0 half of the gate: a shot may only be paid for once the prompt and the
+ * storyboard unit behind it passed the mechanical gate **in the version that is
+ * on disk right now**.
+ *
+ * Only files that exist are checked, and a unit with no file under either
+ * directory is not refused — a project that does not keep units this way, or a
+ * unit not written yet, has nothing to review, and refusing those would block
+ * the start of every project. What is refused is the case this ledger exists
+ * for: the file is there, and no current clean stamp covers it.
+ * @param projectDir - the project directory under the asset root.
+ * @param unit - the unit id to look up.
+ * @returns a refusal, or undefined when there is nothing to refuse.
+ */
+async function checkUnitStamps(projectDir: string, unit: string): Promise<GateDecision | undefined> {
+  const files = await unitFiles(projectDir, unit)
+  if (files.length === 0) return undefined
+  const stamps = await readStamps(projectDir)
+
+  for (const rel of files) {
+    const stamp = stamps[rel]
+    if (stamp === undefined) {
+      return {
+        allow: false,
+        reason: `generate_video: ${rel} 没有 L0 单子 —— 这一版没跑过闸门，拒绝。`
+          + `请先跑 check-prompt.mjs / check-unit.mjs 并加 --stamp。`,
+      }
+    }
+    const current = sha256(await readFile(join(projectDir, rel), 'utf8'))
+    if (current !== stamp.sha256) {
+      return {
+        allow: false,
+        reason: `generate_video: ${rel} 改过之后没有重跑 L0（单子上的指纹对不上现在这一版）—— 拒绝。`
+          + `重跑闸门并加 --stamp 再提交。`,
+      }
+    }
+    if (stamp.errors.length > 0) {
+      return {
+        allow: false,
+        reason: `generate_video: ${rel} 的 L0 单子有 ${stamp.errors.length} 个 ERROR —— 拒绝。先改到 0 ERROR 再提交。`,
+      }
+    }
+  }
+  return undefined
+}
+
 /**
  * Decide whether one paid generation may start.
  *
@@ -137,25 +251,40 @@ export async function checkGate(request: GateRequest): Promise<GateDecision> {
   if (project === '') {
     return { allow: true, note: `${kind}: 没带 project，没有清单可核对 —— 放行但标记` }
   }
+  const projectDir = join(request.assetsRoot, project)
+  const notes: string[] = []
 
-  const manifestPath = await findManifest(join(request.assetsRoot, project))
+  // ① 清单：这一次生成在项目计划里吗
+  const manifestPath = await findManifest(projectDir)
   if (manifestPath === undefined) {
-    return { allow: true, note: `${kind}: 项目「${project}」还没有资产清单 —— 放行但标记` }
+    notes.push('项目还没有资产清单')
+  } else {
+    const ids = manifestIds(await readFile(manifestPath, 'utf8'))
+    const named = labelIds(request.label ?? '')
+    const unknown = named.filter(id => !ids.has(id))
+    if (unknown.length > 0) {
+      return {
+        allow: false,
+        reason: `${kind}: 资产清单里没有 ${unknown.join('、')}（清单共 ${ids.size} 项）。`
+          + '这一项不在规范内 —— 拒绝。'
+          + '要加的话得从上游加起（先改讲戏本），不能在下游凭空插。',
+      }
+    }
+    if (named.length === 0) notes.push('label 未标明资产编号')
   }
 
-  const ids = manifestIds(await readFile(manifestPath, 'utf8'))
-  const named = labelIds(request.label ?? '')
-  const unknown = named.filter(id => !ids.has(id))
-  if (unknown.length > 0) {
-    return {
-      allow: false,
-      reason: `${kind}: 资产清单里没有 ${unknown.join('、')}（清单共 ${ids.size} 项）。`
-        + '这一项不在规范内 —— 拒绝。'
-        + '要加的话得从上游加起（先改讲戏本），不能在下游凭空插。',
+  // ② 单子：这一版的分镜与提示词过没过 L0。只对花钱的镜头生成查。
+  if (request.kind === 'video') {
+    const unit = unitOf(request)
+    if (unit === undefined) {
+      notes.push('没标明单元号（label 里没有 U01 这类编号），无法核对 L0 单子')
+    } else {
+      const refusal = await checkUnitStamps(projectDir, unit)
+      if (refusal !== undefined) return refusal
     }
   }
 
-  return named.length === 0
-    ? { allow: true, note: `${kind}: label 未标明资产编号，放行但标记（project=${project}）` }
-    : { allow: true }
+  return notes.length === 0
+    ? { allow: true }
+    : { allow: true, note: `${kind}: ${notes.join('；')} —— 放行但标记` }
 }

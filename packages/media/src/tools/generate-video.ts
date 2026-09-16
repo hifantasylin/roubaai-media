@@ -155,7 +155,8 @@ export function registerGenerateVideo(ctx: Context): () => void {
       callbackUrl: { type: 'string', description: 'Task-terminal callback URL (生成完成后 POST 通知).' },
       watermark: { type: 'boolean', description: 'Add watermark, default false.' },
       project: { type: 'string', description: '成本记账用：当前项目名（如 奇幻超人），用于媒体成本账归档；不传则归到工作空间。' },
-      label: { type: 'string', description: '成本记账用：本镜头标识（如 EP01_镜02_镇民躲藏）；同一 (project,label) 第二次出现自动记为重试。' },
+      label: { type: 'string', description: '成本记账用：本镜头标识（如 EP01_镜02_镇民躲藏）；同一 (project,label) 第二次出现自动记为重试。闸门也会从里面认单元号。' },
+      unit: { type: 'string', description: '本镜头所属单元号（如 U09）。闸门用它定位这一版的分镜与提示词、核对 L0 单子；不传则从 label 里认 U01 这类编号。' },
     },
     output: {
       schema: {
@@ -179,6 +180,7 @@ export function registerGenerateVideo(ctx: Context): () => void {
         kind: 'video',
         project: args.project,
         label: args.label,
+        unit: args.unit,
         assetsRoot: primaryAssetsRoot(workspaceOfAgent(exec.agent)),
       })
       if (!gate.allow) throw new Error(gate.reason)
