@@ -19,15 +19,16 @@
  * ## What it deliberately does not do
  *
  * It does not review the prompt's quality, judge the framing, or second-guess a
- * creative decision. It checks one thing — whether the work being paid for is
- * work this project planned — and leaves everything inside that boundary to the
- * model and the user.
+ * creative decision. It asks whether the work being paid for is work this
+ * project planned, reviewed, and laid out for the user to look at — three facts
+ * about the project's own files — and leaves everything inside that boundary to
+ * the model and the user.
  *
  * @module @roubaai/media/gate
  */
 
 import { createHash } from 'node:crypto'
-import { readFile, readdir } from 'node:fs/promises'
+import { readFile, readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 
 /** The generation kinds the gate guards. */
@@ -119,6 +120,13 @@ async function findManifest(projectDir: string): Promise<string | undefined> {
 const STAMP_FILE = '.gates/l0.json'
 
 /**
+ * The canvas blueprint, relative to the project directory. The skill fixes this
+ * path (`11-canvas-preview.md`: 不可改名换位) precisely so that a reader other
+ * than the canvas frontend can find it.
+ */
+const BLUEPRINT_FILE = 'canvas-blueprint.json'
+
+/**
  * Where a unit's two artifacts live, relative to the project directory. This
  * mirrors the layout the skill's text-asset single source declares, and is a
  * short explicit list rather than a walk of the project: the gate reads only
@@ -196,11 +204,10 @@ async function unitFiles(projectDir: string, unit: string): Promise<readonly str
  * it is enough for the next step to be obvious. Spelling out the procedure here
  * would duplicate `00-gates.md` and rot the moment it changes.
  * @param projectDir - the project directory under the asset root.
- * @param unit - the unit id to look up.
+ * @param files - the unit's artifacts that exist on disk, project-relative.
  * @returns a refusal, or undefined when there is nothing to refuse.
  */
-async function checkUnitStamps(projectDir: string, unit: string): Promise<GateDecision | undefined> {
-  const files = await unitFiles(projectDir, unit)
+async function checkUnitStamps(projectDir: string, files: readonly string[]): Promise<GateDecision | undefined> {
   if (files.length === 0) return undefined
   const stamps = await readStamps(projectDir)
 
@@ -220,6 +227,65 @@ async function checkUnitStamps(projectDir: string, unit: string): Promise<GateDe
         allow: false,
         reason: `generate_video 被拒：${rel} 的 L0 有 ${stamp.errors.length} 个 ERROR（${heads}${rest}）。参考 00-gates.md。`,
       }
+    }
+  }
+  return undefined
+}
+
+/** A file's modification time, or undefined when it is not there. */
+async function mtimeOf(path: string): Promise<number | undefined> {
+  try {
+    return (await stat(path)).mtimeMs
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The canvas half of the gate: a shot may only be paid for once the blueprint on
+ * disk is at least as new as every artifact of the unit behind it.
+ *
+ * The rule it enforces is the skill's own (`11-canvas-preview.md` §阶段接续,
+ * §完成标准): 过审之后、生成之前重铺一次画布，让用户看见每个镜头实际引用了
+ * 哪几张参考图。That review is the cheapest place to catch 引多了 / 引少了 /
+ * 引错了 — so a run that skips the re-lay is spending money on wiring nobody
+ * looked at.
+ *
+ * What this can prove is narrow, and worth stating: the blueprint is newer than
+ * the prompts, not that a human read it. It catches "forgot to lay the canvas at
+ * all" and "laid it, then changed the prompts", which is the failure the rule was
+ * written against. It cannot catch "laid it and nobody looked", and no check on
+ * a file can — that would need the model to declare its own compliance.
+ *
+ * A unit with no artifact on disk is left alone, the same asymmetry the L0 half
+ * uses: a project that does not keep units this way has nothing to preview.
+ * @param projectDir - the project directory under the asset root.
+ * @param files - the unit's artifacts that exist on disk, project-relative.
+ * @returns a refusal, or undefined when there is nothing to refuse.
+ */
+async function checkCanvas(projectDir: string, files: readonly string[]): Promise<GateDecision | undefined> {
+  if (files.length === 0) return undefined
+
+  const blueprint = await mtimeOf(join(projectDir, BLUEPRINT_FILE))
+  if (blueprint === undefined) {
+    return { allow: false, reason: 'generate_video 被拒：还没铺过画布，铺了再生成。参考 11-canvas-preview.md。' }
+  }
+
+  let newest = -Infinity
+  let newestRel = ''
+  for (const rel of files) {
+    const mtime = await mtimeOf(join(projectDir, rel))
+    if (mtime !== undefined && mtime > newest) {
+      newest = mtime
+      newestRel = rel
+    }
+  }
+  // A tie passes: the same write can land on the same millisecond, and refusing
+  // that would fail a run that did exactly what the document asks.
+  if (newest > blueprint) {
+    return {
+      allow: false,
+      reason: `generate_video 被拒：${newestRel} 改过之后没重铺画布，重铺了再生成。参考 11-canvas-preview.md。`,
     }
   }
   return undefined
@@ -272,14 +338,20 @@ export async function checkGate(request: GateRequest): Promise<GateDecision> {
     if (named.length === 0) notes.push('label 未标明资产编号')
   }
 
-  // ② 单子：这一版的分镜与提示词过没过 L0。只对花钱的镜头生成查。
+  // ② 记录与画布：这一版的分镜提示词过没过 L0、过审后铺没铺画布。只对花钱的镜头生成查。
   if (request.kind === 'video') {
     const unit = unitOf(request)
     if (unit === undefined) {
-      notes.push('没标明单元号（label 里没有 U01 这类编号），无法核对 L0 单子')
+      notes.push('没标明单元号（label 里没有 U01 这类编号），无法核对 L0 与画布')
     } else {
-      const refusal = await checkUnitStamps(projectDir, unit)
-      if (refusal !== undefined) return refusal
+      const files = await unitFiles(projectDir, unit)
+      const stamps = await checkUnitStamps(projectDir, files)
+      if (stamps !== undefined) return stamps
+      // Ordered after the stamps because the document orders them that way
+      // (过审 → 重铺 → 生成): a prompt that still needs work is the more useful
+      // thing to report first.
+      const canvas = await checkCanvas(projectDir, files)
+      if (canvas !== undefined) return canvas
     }
   }
 

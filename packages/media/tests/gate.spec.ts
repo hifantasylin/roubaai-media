@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { checkGate, labelIds, manifestIds, unitOf } from '../src/gate.ts'
@@ -144,21 +144,50 @@ describe.skipIf(!hasReal)('checkGate against a real project manifest', () => {
 
 const PROMPT = '# U01\n\n```\n一个最小提示词\n```\n'
 
-/** A project holding one unit's artifacts, with a ledger when asked for one. */
-async function unitFixture(options: { prompt?: string | null; unitFile?: string; ledger?: unknown }): Promise<string> {
+/** How old a unit's artifacts are, so "newer" is never a same-millisecond tie. */
+const UNIT_MTIME = new Date(Date.now() - 120_000)
+
+/**
+ * A project holding one unit's artifacts, with a manifest, a ledger and a canvas
+ * blueprint when a test asks for one.
+ *
+ * No blueprint by default: most cases here are refused by the L0 half, which
+ * runs first, so only a case that expects to get past that has to lay one.
+ */
+async function unitFixture(options: {
+  manifest?: string
+  prompt?: string | null
+  unitFile?: string
+  ledger?: unknown
+  blueprint?: 'fresh' | 'stale'
+}): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'gate-unit-'))
   const dir = join(root, '演示项目')
+  await mkdir(dir, { recursive: true })
+  const artifacts: string[] = []
+  if (options.manifest !== undefined) await writeFile(join(dir, '演示项目_资产库.md'), options.manifest)
   if (options.prompt !== null) {
     await mkdir(join(dir, 'prompts'), { recursive: true })
     await writeFile(join(dir, 'prompts', 'U01.md'), options.prompt ?? PROMPT)
+    artifacts.push(join(dir, 'prompts', 'U01.md'))
   }
   if (options.unitFile !== undefined) {
     await mkdir(join(dir, '分镜', '单元'), { recursive: true })
     await writeFile(join(dir, '分镜', '单元', 'U01.md'), options.unitFile)
+    artifacts.push(join(dir, '分镜', '单元', 'U01.md'))
   }
   if (options.ledger !== undefined) {
     await mkdir(join(dir, '.gates'), { recursive: true })
     await writeFile(join(dir, '.gates', 'l0.json'), JSON.stringify(options.ledger))
+  }
+  // Backdated so a blueprint written "now" is unambiguously newer: the canvas
+  // rule is about ordering, not about how fast the filesystem stamps a write.
+  for (const artifact of artifacts) await utimes(artifact, UNIT_MTIME, UNIT_MTIME)
+  if (options.blueprint !== undefined) {
+    const at = options.blueprint === 'fresh' ? new Date() : new Date(Date.now() - 600_000)
+    const blueprint = join(dir, 'canvas-blueprint.json')
+    await writeFile(blueprint, '{"nodes":[],"connections":[]}')
+    await utimes(blueprint, at, at)
   }
   return root
 }
@@ -228,7 +257,9 @@ describe('the L0 stamp half of the gate', () => {
   })
 
   it('admits a clean, current stamp', async () => {
-    const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT) })
+    // A blueprint too, because the canvas half runs after this one and would
+    // otherwise be the thing refusing — see the block below.
+    const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT), blueprint: 'fresh' })
     const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
     expect(decision.allow).toBe(true)
   })
@@ -242,6 +273,62 @@ describe('the L0 stamp half of the gate', () => {
   it('does not look for stamps when the call is not a video', async () => {
     const root = await unitFixture({})
     const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: 'U01_x' })
+    expect(decision.allow).toBe(true)
+  })
+})
+
+describe('the canvas half of the gate', () => {
+  it('refuses a unit that passed L0 but was never laid out on the canvas', async () => {
+    const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT) })
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(false)
+    const reason = decision.allow === false ? decision.reason : ''
+    // One line plus a pointer, the same contract the other refusals keep.
+    expect(reason).toContain('还没铺过画布')
+    expect(reason).toContain('参考 11-canvas-preview.md')
+    expect(reason.split('\n')).toHaveLength(1)
+  })
+
+  it('refuses a blueprint older than the prompt it is supposed to show', async () => {
+    const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT), blueprint: 'stale' })
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(false)
+    const reason = decision.allow === false ? decision.reason : ''
+    expect(reason).toContain('prompts/U01.md 改过之后没重铺画布')
+    expect(reason).toContain('参考 11-canvas-preview.md')
+    expect(reason.split('\n')).toHaveLength(1)
+  })
+
+  it('names whichever artifact is newest, not always the prompt', async () => {
+    const storyboard = '# U01\n'
+    const root = await unitFixture({
+      prompt: null, unitFile: storyboard, ledger: ledgerFor('分镜/单元/U01.md', storyboard), blueprint: 'stale',
+    })
+    const path = join(root, '演示项目', '分镜', '单元', 'U01.md')
+    const now = new Date()
+    await utimes(path, now, now)
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow === false && decision.reason).toContain('分镜/单元/U01.md 改过之后没重铺画布')
+  })
+
+  it('admits a blueprint laid after the unit was last touched', async () => {
+    const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT), blueprint: 'fresh' })
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(true)
+  })
+
+  it('leaves a unit with no artifact alone, the same asymmetry the L0 half uses', async () => {
+    const root = await unitFixture({ manifest: MANIFEST })
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U13' })
+    expect(decision.allow).toBe(true)
+  })
+
+  it('leaves image generation alone: the blueprint is written after P3 images land', async () => {
+    // A unit artifact exists, so this same call as a video would be refused —
+    // that the image call passes is the point. Requiring a blueprint at P3 would
+    // deadlock the stage that produces the assets the blueprint is made of.
+    const root = await unitFixture({ manifest: MANIFEST, prompt: null, unitFile: '# U01\n' })
+    const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: 'CH001_主角四视图' })
     expect(decision.allow).toBe(true)
   })
 })
