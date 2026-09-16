@@ -182,26 +182,35 @@ describe('the L0 stamp half of the gate', () => {
     const root = await unitFixture({})
     const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
     expect(decision.allow).toBe(false)
-    expect(decision.allow === false && decision.reason).toContain('没有 L0 单子')
-    // A refusal is a route: the way out has to be in the message, not just the
-    // fact that something is missing.
-    expect(decision.allow === false && decision.reason).toContain('check-prompt.mjs')
-    expect(decision.allow === false && decision.reason).toContain('--stamp')
+    const reason = decision.allow === false ? decision.reason : ''
+    // A refusal is a route: it has to say what is missing, why it matters, and
+    // the literal command that resolves it -- readable without this conversation.
+    expect(reason).toContain('还没跑过 L0 闸门')
+    expect(reason).toContain('check-prompt.mjs')
+    expect(reason).toContain('--stamp')
+    expect(reason).toContain('重新提交')
+    expect(reason).not.toContain('单子')
   })
 
   it('refuses a prompt edited after it was stamped', async () => {
     const root = await unitFixture({ prompt: `${PROMPT}\n改了一句。\n`, ledger: ledgerFor('prompts/U01.md', PROMPT) })
     const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
     expect(decision.allow).toBe(false)
-    expect(decision.allow === false && decision.reason).toContain('改过之后没有重跑 L0')
+    expect(decision.allow === false && decision.reason).toContain('又被改动过')
+    expect(decision.allow === false && decision.reason).toContain('--stamp')
   })
 
-  it('refuses a stamp that recorded an ERROR', async () => {
-    const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT, ['光影 8 项缺 8 项']) })
+  it('refuses a stamp that recorded an ERROR, and shows the errors themselves', async () => {
+    const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT, ['光影 8 项缺 8 项', '表演 7 项缺 7 项']) })
     const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
     expect(decision.allow).toBe(false)
-    expect(decision.allow === false && decision.reason).toContain('1 个 ERROR')
-    expect(decision.allow === false && decision.reason).toContain('--stamp')
+    const reason = decision.allow === false ? decision.reason : ''
+    expect(reason).toContain('2 个 ERROR')
+    // The findings travel with the refusal, so the fix does not need a re-run
+    // just to find out what is wrong.
+    expect(reason).toContain('光影 8 项缺 8 项')
+    expect(reason).toContain('表演 7 项缺 7 项')
+    expect(reason).toContain('--stamp')
   })
 
   it('names the storyboard checker when the missing stamp is on the unit file', async () => {

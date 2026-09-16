@@ -242,23 +242,47 @@ async function checkUnitStamps(projectDir: string, unit: string): Promise<GateDe
     if (stamp === undefined) {
       return {
         allow: false,
-        reason: `generate_video: ${rel} 还没有 L0 单子 —— 这一版没跑过闸门，拒绝。\n`
-          + `先跑一遍再提交：\n  ${stampCommand(rel)}`,
+        reason:
+          `generate_video 被拒：${rel} 这一版还没跑过 L0 闸门。\n`
+          + `\n`
+          + `L0 是免费的机械体检（字数 / 光影 8 项 / 表演 7 项 / 台词 / 切片连续性，见 00-gates.md）。\n`
+          + `花钱生成之前必须先过它——没有它的结果，闸门无法确认这一版是合格的。\n`
+          + `\n`
+          + `跑这一条，它会打印 ERROR 清单并记下这次的结果：\n`
+          + `  ${stampCommand(rel)}\n`
+          + `\n`
+          + `有 ERROR 就改到 0，然后重新提交这次 generate_video。`,
       }
     }
     const current = sha256(await readFile(join(projectDir, rel), 'utf8'))
     if (current !== stamp.sha256) {
       return {
         allow: false,
-        reason: `generate_video: ${rel} 改过之后没有重跑 L0（单子上的指纹对不上现在这一版）—— 拒绝。\n`
-          + `重跑一遍再提交：\n  ${stampCommand(rel)}`,
+        reason:
+          `generate_video 被拒：${rel} 在跑过 L0 之后又被改动过。\n`
+          + `\n`
+          + `上次 L0 的结果对应的是改动前的内容，已经不适用——现在这一版没有体检过。\n`
+          + `\n`
+          + `重跑这一条：\n`
+          + `  ${stampCommand(rel)}\n`
+          + `\n`
+          + `确认 0 ERROR 后，重新提交这次 generate_video。`,
       }
     }
     if (stamp.errors.length > 0) {
+      const shown = stamp.errors.slice(0, 5).map(e => `  - ${e}`).join('\n')
+      const more = stamp.errors.length > 5 ? `\n  …还有 ${stamp.errors.length - 5} 条` : ''
       return {
         allow: false,
-        reason: `generate_video: ${rel} 的 L0 单子有 ${stamp.errors.length} 个 ERROR —— 拒绝。\n`
-          + `先跑这条看是哪几条、改到 0 ERROR：\n  ${stampCommand(rel)}`,
+        reason:
+          `generate_video 被拒：${rel} 的 L0 结果里有 ${stamp.errors.length} 个 ERROR，花钱之前必须清零：\n`
+          + `\n`
+          + `${shown}${more}\n`
+          + `\n`
+          + `改完重跑这一条（会重新体检并更新结果）：\n`
+          + `  ${stampCommand(rel)}\n`
+          + `\n`
+          + `然后重新提交这次 generate_video。`,
       }
     }
   }
@@ -302,11 +326,24 @@ export async function checkGate(request: GateRequest): Promise<GateDecision> {
     const named = labelIds(request.label ?? '')
     const unknown = named.filter(id => !ids.has(id))
     if (unknown.length > 0) {
+      // A key-frame id is not a random miss — it is the one shape that has a
+      // right answer instead of a route, so say it rather than let the model
+      // try to justify adding it.
+      const asFirstFrame = unknown.some(id => id.startsWith('KF') || id.startsWith('FF'))
       return {
         allow: false,
-        reason: `${kind}: 资产清单里没有 ${unknown.join('、')}（清单共 ${ids.size} 项）。`
-          + '这一项不在规范内 —— 拒绝。'
-          + '要加的话得从上游加起（先改讲戏本），不能在下游凭空插。',
+        reason:
+          `${kind} 被拒：资产清单里没有「${unknown.join('、')}」这一项。\n`
+          + `\n`
+          + `项目「${project}」的资产清单共 ${ids.size} 项，都与它不匹配。清单外的图不生成——\n`
+          + `它不在这个项目的计划里。\n`
+          + `\n`
+          + (asFirstFrame
+            ? `· 如果它是首帧：首帧不用生成。从上一镜的成片抽尾帧即可（media_extract_frame，免费，\n`
+              + `  而且天然接得上——生成的首帧跟上一镜尾帧不可能一致，必然跳变）。\n`
+            : '')
+          + `· 如果确实需要这个资产：从上游加起——先改讲戏本里的资产清单、重新出清单，再生成。\n`
+          + `  不能只在这里生成一张清单上没有的图。`,
       }
     }
     if (named.length === 0) notes.push('label 未标明资产编号')
