@@ -29,7 +29,7 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import { isBuiltin } from 'node:module'
-import { basename, dirname, resolve as resolvePath, sep } from 'node:path'
+import { basename, dirname, isAbsolute, relative as relativePath, resolve as resolvePath, sep } from 'node:path'
 import { transform } from 'lightningcss'
 import type { UserConfig } from 'tsdown'
 
@@ -63,9 +63,40 @@ const GENERATED_REMOTE = /^@deepseek-ai\/dsh-[a-z0-9]+(?:-[a-z0-9]+)*\/remote$/
  * Virtual-id wrapper keeping module CSS away from tsdown's own css pipeline.
  * The suffix matters: tsdown's guard matches ids ending in `.css`, so the
  * virtual id must not.
+ *
+ * The id names the stylesheet *relative to the package root*, because rolldown
+ * echoes a module id into the emitted `//#region` comment: an absolute one
+ * stamps the builder's own checkout path into the shipped bundle, which is
+ * both noise and a small leak of whoever ran the pack.
  */
 const CSS_VIRTUAL_PREFIX = '\0dsh-css:'
 const CSS_VIRTUAL_SUFFIX = '.mjs'
+
+/** The package root tsdown is run in; virtual ids are spelled relative to it. */
+const PACKAGE_ROOT = process.cwd()
+
+/**
+ * The virtual id for one stylesheet. Falls back to the absolute path for a
+ * stylesheet outside the package root, where a relative id would only be a
+ * longer way of writing the same thing.
+ * @param absolute - the stylesheet's absolute path.
+ * @returns the virtual module id.
+ */
+function cssVirtualId(absolute: string): string {
+  const relative = relativePath(PACKAGE_ROOT, absolute)
+  const portable = relative.startsWith('..') ? absolute : relative.split(sep).join('/')
+  return CSS_VIRTUAL_PREFIX + portable + CSS_VIRTUAL_SUFFIX
+}
+
+/**
+ * The stylesheet a virtual id names.
+ * @param virtualId - a value produced by {@link cssVirtualId}.
+ * @returns the absolute path to read and to watch.
+ */
+function cssFileOf(virtualId: string): string {
+  const id = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+  return isAbsolute(id) ? id : resolvePath(PACKAGE_ROOT, id)
+}
 
 /** Path segment separating a package's tsc output from the sources it came from. */
 const TYPES_MARKER = `${sep}lib${sep}types${sep}`
@@ -164,11 +195,11 @@ function clientConfig(id: string, entry: string, outDir: string): UserConfig {
       resolveId(source: string, importer: string | undefined) {
         if (!source.endsWith('.module.css')) return null
         const absolute = importer !== undefined ? sourceAssetPath(source, importer) : source
-        return CSS_VIRTUAL_PREFIX + absolute + CSS_VIRTUAL_SUFFIX
+        return cssVirtualId(absolute)
       },
       async load(virtualId: string) {
         if (!virtualId.startsWith(CSS_VIRTUAL_PREFIX)) return null
-        const fileId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+        const fileId = cssFileOf(virtualId)
         // The virtual id otherwise hides the physical stylesheet from the watch graph.
         this.addWatchFile(fileId)
         const source = readFileSync(fileId)
