@@ -166,9 +166,32 @@ const MIME: Record<string, string> = {
   '.map': 'application/json; charset=utf-8',
 }
 
-function send(res: ServerResponse, status: number, contentType: string, body: string | Buffer): void {
+/**
+ * The cache policy for one path below the mount point.
+ *
+ * Vite fingerprints everything under `assets/`, so those files are safe to
+ * cache forever; `index.html` is not, and a stale one is the difference
+ * between a rebuilt frontend showing up and the browser keeping the old one.
+ * Without this the whole frontend was served with the shell's defaults, which
+ * left a rebuilt canvas invisible until a hard refresh.
+ * @param relative - the request path below the mount point.
+ * @returns the headers to merge into the response.
+ */
+function cacheFor(relative: string): Record<string, string> {
+  return relative.startsWith('assets/')
+    ? { 'cache-control': 'public, max-age=31536000, immutable' }
+    : { 'cache-control': 'no-cache' }
+}
+
+function send(
+  res: ServerResponse,
+  status: number,
+  contentType: string,
+  body: string | Buffer,
+  headers: Record<string, string> = {},
+): void {
   const payload = typeof body === 'string' ? Buffer.from(body, 'utf8') : body
-  res.writeHead(status, { 'content-type': contentType, 'content-length': String(payload.length) })
+  res.writeHead(status, { 'content-type': contentType, 'content-length': String(payload.length), ...headers })
   res.end(payload)
 }
 
@@ -248,13 +271,13 @@ export async function handleCanvasRequest(
   // from the frontend build: they are what makes a freshly built canvas aware of
   // the asset library.
   if (relative === 'plugins/index.json') {
-    send(res, 200, 'application/json; charset=utf-8', JSON.stringify([`${basePath}/plugins/roubaai-assets.js`]))
+    send(res, 200, 'application/json; charset=utf-8', JSON.stringify([`${basePath}/plugins/roubaai-assets.js`]), cacheFor('plugins/index.json'))
     return
   }
   if (relative === 'plugins/roubaai-assets.js') {
     try {
       const source = await readFile(join(packageRoot, 'assets', 'roubaai-assets-plugin.js'))
-      send(res, 200, 'text/javascript; charset=utf-8', source)
+      send(res, 200, 'text/javascript; charset=utf-8', source, cacheFor('plugins/roubaai-assets.js'))
     } catch {
       send(res, 404, 'text/plain; charset=utf-8', 'the bundled node plugin is missing from this install')
     }
@@ -277,7 +300,7 @@ export async function handleCanvasRequest(
       '};',
       '',
     ].join('\n')
-    send(res, 200, 'text/javascript; charset=utf-8', runtime)
+    send(res, 200, 'text/javascript; charset=utf-8', runtime, cacheFor('config.js'))
     return
   }
 
@@ -291,7 +314,7 @@ export async function handleCanvasRequest(
     try {
       const info = await stat(target)
       if (info.isFile()) {
-        send(res, 200, MIME[extname(target).toLowerCase()] ?? 'application/octet-stream', await readFile(target))
+        send(res, 200, MIME[extname(target).toLowerCase()] ?? 'application/octet-stream', await readFile(target), cacheFor(relative))
         return
       }
     } catch {
@@ -299,7 +322,7 @@ export async function handleCanvasRequest(
     }
   }
   try {
-    send(res, 200, 'text/html; charset=utf-8', await readFile(join(canvasRoot, 'index.html')))
+    send(res, 200, 'text/html; charset=utf-8', await readFile(join(canvasRoot, 'index.html')), cacheFor('index.html'))
   } catch {
     send(res, 503, 'text/plain; charset=utf-8', missingRootMessage(basePath, canvasRoot))
   }
