@@ -28,6 +28,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import type { Dirent } from 'node:fs'
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 
@@ -241,52 +242,92 @@ async function mtimeOf(path: string): Promise<number | undefined> {
   }
 }
 
+/** The newest of `rels`, which is the one a blueprint has to have caught up with. */
+async function newestOf(projectDir: string, rels: readonly string[]): Promise<{ rel: string; mtime: number } | undefined> {
+  let newest: { rel: string; mtime: number } | undefined
+  for (const rel of rels) {
+    const mtime = await mtimeOf(join(projectDir, rel))
+    if (mtime !== undefined && (newest === undefined || mtime > newest.mtime)) newest = { rel, mtime }
+  }
+  return newest
+}
+
+/** Image files a canvas can show, by extension. */
+const IMAGE_EXT = /\.(?:png|jpe?g|webp|gif|avif)$/iu
+
 /**
- * The canvas half of the gate: a shot may only be paid for once the blueprint on
- * disk is at least as new as every artifact of the unit behind it.
+ * How deep to walk for images. The asset tree is
+ * `<编号>_<类别>/<编号>_<名>/<编号>_<用途>/x.png`, so three levels is all of it.
+ */
+const IMAGE_DEPTH = 3
+
+/**
+ * The newest image under the project — the thing its canvas is meant to show.
+ *
+ * `.gates` is skipped because nothing in it is ever published, and the walk is
+ * depth-bounded so a junction the user made inside the tree cannot send it
+ * round in circles.
+ * @param projectDir - the project directory under the asset root.
+ * @returns the project-relative path and mtime, or undefined when there is no image.
+ */
+async function newestImage(projectDir: string): Promise<{ rel: string; mtime: number } | undefined> {
+  let newest: { rel: string; mtime: number } | undefined
+  const walk = async (dir: string, rel: string, depth: number): Promise<void> => {
+    if (depth > IMAGE_DEPTH) return
+    let entries: Dirent[]
+    try {
+      entries = await readdir(dir, { withFileTypes: true })
+    } catch {
+      return // 目录不在，或读不动：没有图可铺
+    }
+    for (const entry of entries) {
+      const childRel = rel === '' ? entry.name : `${rel}/${entry.name}`
+      if (entry.isDirectory()) {
+        if (entry.name !== '.gates') await walk(join(dir, entry.name), childRel, depth + 1)
+      } else if (IMAGE_EXT.test(entry.name)) {
+        const mtime = await mtimeOf(join(dir, entry.name))
+        if (mtime !== undefined && (newest === undefined || mtime > newest.mtime)) newest = { rel: childRel, mtime }
+      }
+    }
+  }
+  await walk(projectDir, '', 0)
+  return newest
+}
+
+/**
+ * The canvas half of the gate: a paid call may only start once the blueprint on
+ * disk is at least as new as the newest thing it is supposed to show.
  *
  * The rule it enforces is the skill's own (`11-canvas-preview.md` §阶段接续,
- * §完成标准): 过审之后、生成之前重铺一次画布，让用户看见每个镜头实际引用了
- * 哪几张参考图。That review is the cheapest place to catch 引多了 / 引少了 /
- * 引错了 — so a run that skips the re-lay is spending money on wiring nobody
- * looked at.
+ * §完成标准): 每落盘一张就重铺一次画布，让用户看见手里到底有什么、每个镜头
+ * 实际引用了哪几张参考图。That review is the cheapest place to catch 引多了 /
+ * 引少了 / 引错了, and for a batch of asset images it is also the last moment
+ * before the batch is paid for — so a call that would leave the canvas behind
+ * waits until it is caught up.
  *
  * What this can prove is narrow, and worth stating: the blueprint is newer than
- * the prompts, not that a human read it. It catches "forgot to lay the canvas at
- * all" and "laid it, then changed the prompts", which is the failure the rule was
- * written against. It cannot catch "laid it and nobody looked", and no check on
- * a file can — that would need the model to declare its own compliance.
- *
- * A unit with no artifact on disk is left alone, the same asymmetry the L0 half
- * uses: a project that does not keep units this way has nothing to preview.
+ * the thing under it, not that a human read it. It catches "never laid the canvas
+ * at all" and "laid it, then changed the work", which is what the rule was written
+ * against. It cannot catch "laid it and nobody looked", and no check on a file
+ * can — that would need the model to declare its own compliance.
+ * @param kind - `generate_image` or `generate_video`, for the refusal's first word.
  * @param projectDir - the project directory under the asset root.
- * @param files - the unit's artifacts that exist on disk, project-relative.
- * @returns a refusal, or undefined when there is nothing to refuse.
+ * @param newest - the newest artifact the canvas has to have caught up with.
+ * @returns a refusal, or undefined when the canvas is current.
  */
-async function checkCanvas(projectDir: string, files: readonly string[]): Promise<GateDecision | undefined> {
-  if (files.length === 0) return undefined
-
+async function checkBlueprint(
+  kind: string,
+  projectDir: string,
+  newest: { readonly rel: string; readonly mtime: number },
+): Promise<GateDecision | undefined> {
   const blueprint = await mtimeOf(join(projectDir, BLUEPRINT_FILE))
   if (blueprint === undefined) {
-    return { allow: false, reason: 'generate_video 被拒：还没铺过画布，铺了再生成。参考 11-canvas-preview.md。' }
-  }
-
-  let newest = -Infinity
-  let newestRel = ''
-  for (const rel of files) {
-    const mtime = await mtimeOf(join(projectDir, rel))
-    if (mtime !== undefined && mtime > newest) {
-      newest = mtime
-      newestRel = rel
-    }
+    return { allow: false, reason: `${kind} 被拒：还没铺过画布，铺了再生成。参考 11-canvas-preview.md。` }
   }
   // A tie passes: the same write can land on the same millisecond, and refusing
   // that would fail a run that did exactly what the document asks.
-  if (newest > blueprint) {
-    return {
-      allow: false,
-      reason: `generate_video 被拒：${newestRel} 改过之后没重铺画布，重铺了再生成。参考 11-canvas-preview.md。`,
-    }
+  if (newest.mtime > blueprint) {
+    return { allow: false, reason: `${kind} 被拒：${newest.rel} 比画布新，重铺了再生成。参考 11-canvas-preview.md。` }
   }
   return undefined
 }
@@ -338,7 +379,17 @@ export async function checkGate(request: GateRequest): Promise<GateDecision> {
     if (named.length === 0) notes.push('label 未标明资产编号')
   }
 
-  // ② 记录与画布：这一版的分镜提示词过没过 L0、过审后铺没铺画布。只对花钱的镜头生成查。
+  // ② 画布（图）：手上这些图铺给用户看过没有。只对图片生成查，且只在这个项目
+  // 已经有清单时查 —— 立项前那几张风格试探是正当的第一站活，没有资产可铺。
+  if (request.kind === 'image' && manifestPath !== undefined) {
+    const newest = await newestImage(projectDir)
+    if (newest !== undefined) {
+      const refusal = await checkBlueprint(kind, projectDir, newest)
+      if (refusal !== undefined) return refusal
+    }
+  }
+
+  // ③ 记录与画布（镜头）：这一版的分镜提示词过没过 L0、过审后铺没铺画布。
   if (request.kind === 'video') {
     const unit = unitOf(request)
     if (unit === undefined) {
@@ -349,9 +400,13 @@ export async function checkGate(request: GateRequest): Promise<GateDecision> {
       if (stamps !== undefined) return stamps
       // Ordered after the stamps because the document orders them that way
       // (过审 → 重铺 → 生成): a prompt that still needs work is the more useful
-      // thing to report first.
-      const canvas = await checkCanvas(projectDir, files)
-      if (canvas !== undefined) return canvas
+      // thing to report first. A unit with no artifact on disk has nothing to
+      // preview and is left alone, the asymmetry the L0 half also uses.
+      const newest = await newestOf(projectDir, files)
+      if (newest !== undefined) {
+        const canvas = await checkBlueprint(kind, projectDir, newest)
+        if (canvas !== undefined) return canvas
+      }
     }
   }
 

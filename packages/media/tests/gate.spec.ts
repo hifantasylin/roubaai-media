@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { checkGate, labelIds, manifestIds, unitOf } from '../src/gate.ts'
 
 /** A project directory holding a manifest, built fresh per test. */
@@ -130,7 +130,13 @@ describe.skipIf(!hasReal)('checkGate against a real project manifest', () => {
     const decision = await checkGate({
       kind: 'image', assetsRoot: REAL_ROOT, project: REAL_PROJECT, label: 'SC001_高崖草原_母版',
     })
-    expect(decision.allow).toBe(true)
+    // Only the manifest half is asserted. Whether this project's canvas is
+    // current is real-world state that changes under the test (红果子 has images
+    // and no blueprint), and the canvas half has fixtures of its own. What this
+    // proves is the thing it was written for: a declared id is not refused as an
+    // undeclared one.
+    const reason = decision.allow === false ? decision.reason : ''
+    expect(reason).not.toContain('未列入的不生成')
   })
 
   it('refuses a key frame the project never planned', async () => {
@@ -294,7 +300,7 @@ describe('the canvas half of the gate', () => {
     const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
     expect(decision.allow).toBe(false)
     const reason = decision.allow === false ? decision.reason : ''
-    expect(reason).toContain('prompts/U01.md 改过之后没重铺画布')
+    expect(reason).toContain('prompts/U01.md 比画布新')
     expect(reason).toContain('参考 11-canvas-preview.md')
     expect(reason.split('\n')).toHaveLength(1)
   })
@@ -308,7 +314,7 @@ describe('the canvas half of the gate', () => {
     const now = new Date()
     await utimes(path, now, now)
     const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
-    expect(decision.allow === false && decision.reason).toContain('分镜/单元/U01.md 改过之后没重铺画布')
+    expect(decision.allow === false && decision.reason).toContain('分镜/单元/U01.md 比画布新')
   })
 
   it('admits a blueprint laid after the unit was last touched', async () => {
@@ -322,13 +328,83 @@ describe('the canvas half of the gate', () => {
     const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U13' })
     expect(decision.allow).toBe(true)
   })
+})
 
-  it('leaves image generation alone: the blueprint is written after P3 images land', async () => {
-    // A unit artifact exists, so this same call as a video would be refused —
-    // that the image call passes is the point. Requiring a blueprint at P3 would
-    // deadlock the stage that produces the assets the blueprint is made of.
-    const root = await unitFixture({ manifest: MANIFEST, prompt: null, unitFile: '# U01\n' })
-    const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: 'CH001_主角四视图' })
+/**
+ * A project holding a manifest, whatever asset images a test asks for, and a
+ * blueprint when it asks for one. Asset images are backdated for the same reason
+ * the unit fixture backdates its own: the rule is about ordering.
+ */
+async function assetFixture(options: {
+  manifest?: string
+  images?: readonly string[]
+  blueprint?: 'fresh' | 'stale'
+}): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'gate-asset-'))
+  const dir = join(root, '演示项目')
+  await mkdir(dir, { recursive: true })
+  if (options.manifest !== undefined) await writeFile(join(dir, '演示项目_资产库.md'), options.manifest)
+  const landed = new Date(Date.now() - 120_000)
+  for (const rel of options.images ?? []) {
+    const path = join(dir, rel)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, 'not really a png')
+    await utimes(path, landed, landed)
+  }
+  if (options.blueprint !== undefined) {
+    const at = options.blueprint === 'fresh' ? new Date() : new Date(Date.now() - 600_000)
+    const blueprint = join(dir, 'canvas-blueprint.json')
+    await writeFile(blueprint, '{"nodes":[],"connections":[]}')
+    await utimes(blueprint, at, at)
+  }
+  return root
+}
+
+describe('the canvas half of the gate, for images', () => {
+  const IMAGE = '01_角色/CH001_主角/02_定稿图/CH001_主角.png'
+
+  it('lets the first asset image through: there is nothing to show yet', async () => {
+    const root = await assetFixture({ manifest: MANIFEST })
+    const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: 'CH001_主角' })
+    expect(decision.allow).toBe(true)
+  })
+
+  it('refuses the next image once one has landed and the canvas was never laid', async () => {
+    const root = await assetFixture({ manifest: MANIFEST, images: [IMAGE] })
+    const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: 'SC001_厨房' })
+    expect(decision.allow).toBe(false)
+    const reason = decision.allow === false ? decision.reason : ''
+    expect(reason).toContain('还没铺过画布')
+    expect(reason).toContain('参考 11-canvas-preview.md')
+    expect(reason.split('\n')).toHaveLength(1)
+  })
+
+  it('names the image the canvas is behind on', async () => {
+    const root = await assetFixture({ manifest: MANIFEST, images: [IMAGE], blueprint: 'stale' })
+    const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: 'SC001_厨房' })
+    expect(decision.allow === false && decision.reason).toContain(`${IMAGE} 比画布新`)
+  })
+
+  it('admits the next image once the canvas has caught up', async () => {
+    const root = await assetFixture({ manifest: MANIFEST, images: [IMAGE], blueprint: 'fresh' })
+    const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: 'SC001_厨房' })
+    expect(decision.allow).toBe(true)
+  })
+
+  it('leaves a project with no manifest alone, so the style probes at P1 still run', async () => {
+    // 门 0 的非对称：立项前没有清单，那几张风格试探是正当的第一站活。
+    const root = await assetFixture({ images: ['05_风格参考/ST001_风格四选一.png'] })
+    const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: '风格候选 二' })
+    expect(decision.allow).toBe(true)
+  })
+
+  it('ignores what a canvas can never show: the ledger and the text files', async () => {
+    const root = await assetFixture({ manifest: MANIFEST })
+    const dir = join(root, '演示项目')
+    await mkdir(join(dir, '.gates'), { recursive: true })
+    await writeFile(join(dir, '.gates', 'l0.json'), '{}')
+    await writeFile(join(dir, '演示项目_出图提示词.md'), '# 词')
+    const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: 'CH001_主角' })
     expect(decision.allow).toBe(true)
   })
 })
