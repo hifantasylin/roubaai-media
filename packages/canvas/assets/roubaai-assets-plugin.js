@@ -77,13 +77,30 @@ export function blueprintOps(blueprint, origin = { x: 0, y: 0 }) {
   return ops;
 }
 
+/**
+ * The generation overrides the canvas reads off a node before falling back to
+ * the global config. Kept in step with the app's copy in `blueprint.ts`.
+ */
+function generationFields(entry) {
+  const fields = {};
+  for (const key of ["model", "size", "quality", "vquality", "videoMode"]) {
+    if (typeof entry?.[key] === "string" && entry[key] !== "") fields[key] = entry[key];
+  }
+  if (typeof entry?.seconds === "string" || typeof entry?.seconds === "number") fields.seconds = String(entry.seconds);
+  for (const key of ["generateAudio", "watermark"]) {
+    if (typeof entry?.[key] === "boolean") fields[key] = entry[key];
+  }
+  if (entry?.count !== undefined) fields.count = Number(entry.count) || 1;
+  return fields;
+}
+
 /** Only the metadata each node type actually reads, so nothing invents a field. */
 function blueprintMetadata(type, entry) {
   const prompt = typeof entry?.prompt === "string" ? entry.prompt : "";
   if (type === "text") return { content: typeof entry?.content === "string" ? entry.content : "" };
-  if (type === "image") return { content: typeof entry?.url === "string" ? entry.url : "", prompt };
-  if (type === "video") return { prompt };
-  if (type === "audio") return { content: typeof entry?.url === "string" ? entry.url : "", prompt };
+  if (type === "image") return { content: typeof entry?.url === "string" ? entry.url : "", prompt, ...generationFields(entry) };
+  if (type === "video") return { content: typeof entry?.url === "string" ? entry.url : "", prompt, ...generationFields(entry) };
+  if (type === "audio") return { content: typeof entry?.url === "string" ? entry.url : "", prompt, ...generationFields(entry) };
   if (type === "config") {
     return {
       ...(typeof entry?.model === "string" ? { model: entry.model } : {}),
