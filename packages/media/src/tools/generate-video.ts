@@ -20,6 +20,7 @@ import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import type { VideoCaps, VideoGenerateInput, VideoGenerationResult, VideoTaskPoll } from '../provider.ts'
 import { readActiveAdapter } from '../settings-lookup.ts'
 import { appendMediaCost, DEFAULT_PROJECT } from '../cost-ledger.ts'
+import { checkGate } from '../gate.ts'
 import { downloadToCache } from '../media-cache.ts'
 import { primaryAssetsRoot, workspaceOfAgent } from '../asset-root.ts'
 
@@ -194,6 +195,15 @@ export function registerGenerateVideo(ctx: Context): () => void {
         ...args.callbackUrl !== undefined ? { callbackUrl: args.callbackUrl } : {},
         ...args.watermark !== undefined ? { watermark: args.watermark } : {},
       }
+      // The money boundary: the last check before `submit` bills the provider.
+      // A refusal throws here, so no task is created and nothing is charged.
+      const gate = await checkGate({
+        kind: 'video',
+        project: args.project,
+        label: args.label,
+        assetsRoot: primaryAssetsRoot(workspaceOfAgent(exec.agent)),
+      })
+      if (!gate.allow) throw new Error(gate.reason)
       const handle = await provider.submit(input, exec.signal)
       // Once the job id is published, work is owned by the task's own
       // cancellation signal, decoupled from `exec.signal`.

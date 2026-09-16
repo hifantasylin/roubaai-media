@@ -31,6 +31,7 @@ import type {
 } from '../provider.ts'
 import { MEDIA_SETTINGS_NAMESPACE, readActiveAdapter, readActiveMediaProvider } from '../settings-lookup.ts'
 import { appendMediaCost, DEFAULT_PROJECT } from '../cost-ledger.ts'
+import { checkGate } from '../gate.ts'
 import { primaryAssetsRoot, workspaceOfAgent } from '../asset-root.ts'
 
 export const name = 'generate_image'
@@ -284,6 +285,19 @@ export function registerGenerateImage(ctx: Context): () => void {
         ...run.tier === undefined ? {} : { resolution: run.tier },
         ...args.quality !== undefined ? { quality: args.quality } : {},
       }
+      // The money boundary, and deliberately the last thing before the job
+      // exists: a refusal here cannot leave a queued task behind. See ../gate.ts
+      // for why this is a plugin check and not a line in a skill.
+      const gate = await checkGate({
+        kind: 'image',
+        project: args.project,
+        label: args.label,
+        assetsRoot: primaryAssetsRoot(workspaceOfAgent(exec.agent)),
+      })
+      if (!gate.allow) throw new Error(gate.reason)
+      // `gate.note` records why a call was allowed without being matched against
+      // a plan. It is deliberately not folded into the job label: that label is
+      // a stable contract the specs and the job listings already depend on.
       // Start the background job; `run()` owns the provider call (which blocks
       // on Maizi's synchronous image generation) under its own AbortController,
       // decoupled from `exec.signal` once the job id is published.
