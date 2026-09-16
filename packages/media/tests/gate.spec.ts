@@ -6,12 +6,18 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { checkGate, labelIds, manifestIds, unitOf } from '../src/gate.ts'
 
-/** A project directory holding a manifest, built fresh per test. */
+/**
+ * A project directory holding a manifest and a laid-out canvas, built fresh per
+ * test. The canvas is part of the fixture because a project that has a manifest
+ * is one whose images must have been laid out first — these cases are about the
+ * manifest half, and leaving the canvas out would refuse them on the other one.
+ */
 async function fixtureProject(manifest: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'gate-'))
   const dir = join(root, '演示项目')
   await mkdir(dir, { recursive: true })
   await writeFile(join(dir, '演示项目_资产库.md'), manifest)
+  await writeFile(join(dir, 'canvas-blueprint.json'), '{"nodes":[],"connections":[]}')
   return root
 }
 
@@ -332,13 +338,14 @@ describe('the canvas half of the gate', () => {
 
 /**
  * A project holding a manifest, whatever asset images a test asks for, and a
- * blueprint when it asks for one. Asset images are backdated for the same reason
- * the unit fixture backdates its own: the rule is about ordering.
+ * blueprint when it asks for one. `beforeImages` is the ordinary case — the
+ * layout goes up before the batch is paid for — and is backdated to make that
+ * explicit rather than incidental.
  */
 async function assetFixture(options: {
   manifest?: string
   images?: readonly string[]
-  blueprint?: 'fresh' | 'stale'
+  blueprint?: 'beforeImages' | 'now'
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'gate-asset-'))
   const dir = join(root, '演示项目')
@@ -352,7 +359,7 @@ async function assetFixture(options: {
     await utimes(path, landed, landed)
   }
   if (options.blueprint !== undefined) {
-    const at = options.blueprint === 'fresh' ? new Date() : new Date(Date.now() - 600_000)
+    const at = options.blueprint === 'now' ? new Date() : new Date(Date.now() - 600_000)
     const blueprint = join(dir, 'canvas-blueprint.json')
     await writeFile(blueprint, '{"nodes":[],"connections":[]}')
     await utimes(blueprint, at, at)
@@ -363,15 +370,9 @@ async function assetFixture(options: {
 describe('the canvas half of the gate, for images', () => {
   const IMAGE = '01_角色/CH001_主角/02_定稿图/CH001_主角.png'
 
-  it('lets the first asset image through: there is nothing to show yet', async () => {
+  it('refuses the batch when the canvas was never laid', async () => {
     const root = await assetFixture({ manifest: MANIFEST })
     const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: 'CH001_主角' })
-    expect(decision.allow).toBe(true)
-  })
-
-  it('refuses the next image once one has landed and the canvas was never laid', async () => {
-    const root = await assetFixture({ manifest: MANIFEST, images: [IMAGE] })
-    const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: 'SC001_厨房' })
     expect(decision.allow).toBe(false)
     const reason = decision.allow === false ? decision.reason : ''
     expect(reason).toContain('还没铺过画布')
@@ -379,15 +380,23 @@ describe('the canvas half of the gate, for images', () => {
     expect(reason.split('\n')).toHaveLength(1)
   })
 
-  it('names the image the canvas is behind on', async () => {
-    const root = await assetFixture({ manifest: MANIFEST, images: [IMAGE], blueprint: 'stale' })
+  it('lays once for the whole batch: a blueprint older than every image is still current', async () => {
+    // Every prompt in the batch is written before the first image is paid for,
+    // so the layout goes up first and the images land underneath it. Checking the
+    // blueprint against the images' mtimes would invert that and force one layout
+    // per image — which is the cost this rule exists to avoid, not to cause.
+    const root = await assetFixture({ manifest: MANIFEST, images: [IMAGE], blueprint: 'beforeImages' })
     const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: 'SC001_厨房' })
-    expect(decision.allow === false && decision.reason).toContain(`${IMAGE} 比画布新`)
+    expect(decision.allow).toBe(true)
   })
 
-  it('admits the next image once the canvas has caught up', async () => {
-    const root = await assetFixture({ manifest: MANIFEST, images: [IMAGE], blueprint: 'fresh' })
-    const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: 'SC001_厨房' })
+  it('does not care how many images have landed since the layout', async () => {
+    const root = await assetFixture({
+      manifest: MANIFEST,
+      images: [IMAGE, '02_场景/SC001_厨房/02_定稿图/SC001_厨房.png', '03_道具/PR001_陶锅/02_定稿图/PR001_陶锅.png'],
+      blueprint: 'beforeImages',
+    })
+    const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: 'PR001_陶锅' })
     expect(decision.allow).toBe(true)
   })
 
@@ -395,16 +404,6 @@ describe('the canvas half of the gate, for images', () => {
     // 门 0 的非对称：立项前没有清单，那几张风格试探是正当的第一站活。
     const root = await assetFixture({ images: ['05_风格参考/ST001_风格四选一.png'] })
     const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: '风格候选 二' })
-    expect(decision.allow).toBe(true)
-  })
-
-  it('ignores what a canvas can never show: the ledger and the text files', async () => {
-    const root = await assetFixture({ manifest: MANIFEST })
-    const dir = join(root, '演示项目')
-    await mkdir(join(dir, '.gates'), { recursive: true })
-    await writeFile(join(dir, '.gates', 'l0.json'), '{}')
-    await writeFile(join(dir, '演示项目_出图提示词.md'), '# 词')
-    const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: 'CH001_主角' })
     expect(decision.allow).toBe(true)
   })
 })

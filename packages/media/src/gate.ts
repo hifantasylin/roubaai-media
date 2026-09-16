@@ -28,7 +28,6 @@
  */
 
 import { createHash } from 'node:crypto'
-import type { Dirent } from 'node:fs'
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 
@@ -252,78 +251,39 @@ async function newestOf(projectDir: string, rels: readonly string[]): Promise<{ 
   return newest
 }
 
-/** Image files a canvas can show, by extension. */
-const IMAGE_EXT = /\.(?:png|jpe?g|webp|gif|avif)$/iu
-
-/**
- * How deep to walk for images. The asset tree is
- * `<编号>_<类别>/<编号>_<名>/<编号>_<用途>/x.png`, so three levels is all of it.
- */
-const IMAGE_DEPTH = 3
-
-/**
- * The newest image under the project — the thing its canvas is meant to show.
- *
- * `.gates` is skipped because nothing in it is ever published, and the walk is
- * depth-bounded so a junction the user made inside the tree cannot send it
- * round in circles.
- * @param projectDir - the project directory under the asset root.
- * @returns the project-relative path and mtime, or undefined when there is no image.
- */
-async function newestImage(projectDir: string): Promise<{ rel: string; mtime: number } | undefined> {
-  let newest: { rel: string; mtime: number } | undefined
-  const walk = async (dir: string, rel: string, depth: number): Promise<void> => {
-    if (depth > IMAGE_DEPTH) return
-    let entries: Dirent[]
-    try {
-      entries = await readdir(dir, { withFileTypes: true })
-    } catch {
-      return // 目录不在，或读不动：没有图可铺
-    }
-    for (const entry of entries) {
-      const childRel = rel === '' ? entry.name : `${rel}/${entry.name}`
-      if (entry.isDirectory()) {
-        if (entry.name !== '.gates') await walk(join(dir, entry.name), childRel, depth + 1)
-      } else if (IMAGE_EXT.test(entry.name)) {
-        const mtime = await mtimeOf(join(dir, entry.name))
-        if (mtime !== undefined && (newest === undefined || mtime > newest.mtime)) newest = { rel: childRel, mtime }
-      }
-    }
-  }
-  await walk(projectDir, '', 0)
-  return newest
-}
-
 /**
  * The canvas half of the gate: a paid call may only start once the blueprint on
- * disk is at least as new as the newest thing it is supposed to show.
+ * disk is there — and, when the caller names something it has to have caught up
+ * with, at least as new as that.
  *
  * The rule it enforces is the skill's own (`11-canvas-preview.md` §阶段接续,
- * §完成标准): 每落盘一张就重铺一次画布，让用户看见手里到底有什么、每个镜头
- * 实际引用了哪几张参考图。That review is the cheapest place to catch 引多了 /
- * 引少了 / 引错了, and for a batch of asset images it is also the last moment
- * before the batch is paid for — so a call that would leave the canvas behind
- * waits until it is caught up.
+ * §完成标准): 动手之前先把这一批铺出来给用户看。For images that is a single
+ * layout before the batch starts — every prompt is already written by then, so
+ * the cards go up with their prompts and empty urls, and the whole batch then
+ * runs against one blueprint. For shots it is a re-lay after the prompt passed
+ * review, because L0 sends the prompt back to be edited.
  *
- * What this can prove is narrow, and worth stating: the blueprint is newer than
- * the thing under it, not that a human read it. It catches "never laid the canvas
- * at all" and "laid it, then changed the work", which is what the rule was written
- * against. It cannot catch "laid it and nobody looked", and no check on a file
- * can — that would need the model to declare its own compliance.
+ * What this can prove is narrow, and worth stating: the blueprint is there, and
+ * where a reference is given, that it is newer. Not that a human read it. It
+ * catches "never laid the canvas at all" and "laid it, then changed the work",
+ * which is what the rule was written against. It cannot catch "laid it and
+ * nobody looked", and no check on a file can — that would need the model to
+ * declare its own compliance.
  * @param kind - `generate_image` or `generate_video`, for the refusal's first word.
  * @param projectDir - the project directory under the asset root.
- * @param newest - the newest artifact the canvas has to have caught up with.
- * @returns a refusal, or undefined when the canvas is current.
+ * @param newest - the artifact the canvas has to have caught up with, if any.
+ * @returns a refusal, or undefined when the canvas is in order.
  */
 async function checkBlueprint(
   kind: string,
   projectDir: string,
-  newest: { readonly rel: string; readonly mtime: number },
+  newest?: { readonly rel: string; readonly mtime: number },
 ): Promise<GateDecision | undefined> {
   const blueprint = await mtimeOf(join(projectDir, BLUEPRINT_FILE))
   if (blueprint === undefined) {
     return { allow: false, reason: `${kind} 被拒：还没铺过画布，铺了再生成。参考 11-canvas-preview.md。` }
   }
+  if (newest === undefined) return undefined
   // A tie passes: the same write can land on the same millisecond, and refusing
   // that would fail a run that did exactly what the document asks.
   if (newest.mtime > blueprint) {
@@ -379,14 +339,13 @@ export async function checkGate(request: GateRequest): Promise<GateDecision> {
     if (named.length === 0) notes.push('label 未标明资产编号')
   }
 
-  // ② 画布（图）：手上这些图铺给用户看过没有。只对图片生成查，且只在这个项目
-  // 已经有清单时查 —— 立项前那几张风格试探是正当的第一站活，没有资产可铺。
+  // ② 画布（图）：整批的提示词在出图前就写好了，所以这时候一次把整批铺出来
+  // （prompt 填上、url 空着）再动手。只查"铺没铺过"，不查新旧 —— 蓝图本来就该
+  // 比这一批图早，拿图片的 mtime 去要求它只会逼成"出一张铺一张"。
+  // 只在这个项目已经有清单时查：立项前那几张风格试探是正当的第一站活。
   if (request.kind === 'image' && manifestPath !== undefined) {
-    const newest = await newestImage(projectDir)
-    if (newest !== undefined) {
-      const refusal = await checkBlueprint(kind, projectDir, newest)
-      if (refusal !== undefined) return refusal
-    }
+    const refusal = await checkBlueprint(kind, projectDir)
+    if (refusal !== undefined) return refusal
   }
 
   // ③ 记录与画布（镜头）：这一版的分镜提示词过没过 L0、过审后铺没铺画布。
