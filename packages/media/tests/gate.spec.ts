@@ -7,17 +7,16 @@ import { dirname, join } from 'node:path'
 import { checkGate, labelIds, manifestIds, unitOf } from '../src/gate.ts'
 
 /**
- * A project directory holding a manifest and a laid-out canvas, built fresh per
- * test. The canvas is part of the fixture because a project that has a manifest
- * is one whose images must have been laid out first — these cases are about the
- * manifest half, and leaving the canvas out would refuse them on the other one.
+ * A project directory holding a manifest, built fresh per test. These cases are
+ * about the manifest half; the canvas is deliberately not part of the fixture —
+ * it is a display layer laid only when the user asks for one, and a project
+ * without it must still generate.
  */
 async function fixtureProject(manifest: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'gate-'))
   const dir = join(root, '演示项目')
   await mkdir(dir, { recursive: true })
   await writeFile(join(dir, '演示项目_资产库.md'), manifest)
-  await writeFile(join(dir, 'canvas-blueprint.json'), '{"nodes":[],"connections":[]}')
   return root
 }
 
@@ -136,11 +135,8 @@ describe.skipIf(!hasReal)('checkGate against a real project manifest', () => {
     const decision = await checkGate({
       kind: 'image', assetsRoot: REAL_ROOT, project: REAL_PROJECT, label: 'SC001_高崖草原_母版',
     })
-    // Only the manifest half is asserted. Whether this project's canvas is
-    // current is real-world state that changes under the test (红果子 has images
-    // and no blueprint), and the canvas half has fixtures of its own. What this
-    // proves is the thing it was written for: a declared id is not refused as an
-    // undeclared one.
+    // Only the manifest half is asserted. What this proves is the thing it was
+    // written for: a declared id is not refused as an undeclared one.
     const reason = decision.allow === false ? decision.reason : ''
     expect(reason).not.toContain('未列入的不生成')
   })
@@ -160,18 +156,17 @@ const PROMPT = '# U01\n\n```\n一个最小提示词\n```\n'
 const UNIT_MTIME = new Date(Date.now() - 120_000)
 
 /**
- * A project holding one unit's artifacts, with a manifest, a ledger and a canvas
- * blueprint when a test asks for one.
+ * A project holding one unit's artifacts, with a manifest and a ledger when a
+ * test asks for one.
  *
- * No blueprint by default: most cases here are refused by the L0 half, which
- * runs first, so only a case that expects to get past that has to lay one.
+ * No canvas anywhere: it left the gate on 2026-09-18 (it is a display layer the
+ * skill lays only when the user asks), so nothing here has to lay one to pass.
  */
 async function unitFixture(options: {
   manifest?: string
   prompt?: string | null
   unitFile?: string
   ledger?: unknown
-  blueprint?: 'fresh' | 'stale'
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'gate-unit-'))
   const dir = join(root, '演示项目')
@@ -192,15 +187,8 @@ async function unitFixture(options: {
     await mkdir(join(dir, '.gates'), { recursive: true })
     await writeFile(join(dir, '.gates', 'l0.json'), JSON.stringify(options.ledger))
   }
-  // Backdated so a blueprint written "now" is unambiguously newer: the canvas
-  // rule is about ordering, not about how fast the filesystem stamps a write.
+  // Backdated so "newer" is never a same-millisecond tie.
   for (const artifact of artifacts) await utimes(artifact, UNIT_MTIME, UNIT_MTIME)
-  if (options.blueprint !== undefined) {
-    const at = options.blueprint === 'fresh' ? new Date() : new Date(Date.now() - 600_000)
-    const blueprint = join(dir, 'canvas-blueprint.json')
-    await writeFile(blueprint, '{"nodes":[],"connections":[]}')
-    await utimes(blueprint, at, at)
-  }
   return root
 }
 
@@ -269,9 +257,7 @@ describe('the L0 stamp half of the gate', () => {
   })
 
   it('admits a clean, current stamp', async () => {
-    // A blueprint too, because the canvas half runs after this one and would
-    // otherwise be the thing refusing — see the block below.
-    const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT), blueprint: 'fresh' })
+    const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT) })
     const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
     expect(decision.allow).toBe(true)
   })
@@ -289,42 +275,26 @@ describe('the L0 stamp half of the gate', () => {
   })
 })
 
-describe('the canvas half of the gate', () => {
-  it('refuses a unit that passed L0 but was never laid out on the canvas', async () => {
+describe('the canvas is not part of the gate', () => {
+  it('admits a unit that passed L0 and was never laid out on the canvas', async () => {
+    // The rule that used to live here (2026-09-17 → 2026-09-18) refused this.
+    // It was removed because the canvas is a display layer the skill lays only
+    // when the user asks for one: "no canvas yet" is a legitimate state of a
+    // project that is generating, so it cannot be a reason to refuse a call.
     const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT) })
     const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
-    expect(decision.allow).toBe(false)
-    const reason = decision.allow === false ? decision.reason : ''
-    // One line plus a pointer, the same contract the other refusals keep.
-    expect(reason).toContain('还没铺过画布')
-    expect(reason).toContain('参考 11-canvas-preview.md')
-    expect(reason.split('\n')).toHaveLength(1)
+    expect(decision.allow).toBe(true)
   })
 
-  it('refuses a blueprint older than the prompt it is supposed to show', async () => {
-    const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT), blueprint: 'stale' })
-    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
-    expect(decision.allow).toBe(false)
-    const reason = decision.allow === false ? decision.reason : ''
-    expect(reason).toContain('prompts/U01.md 比画布新')
-    expect(reason).toContain('参考 11-canvas-preview.md')
-    expect(reason.split('\n')).toHaveLength(1)
-  })
-
-  it('names whichever artifact is newest, not always the prompt', async () => {
-    const storyboard = '# U01\n'
-    const root = await unitFixture({
-      prompt: null, unitFile: storyboard, ledger: ledgerFor('分镜/单元/U01.md', storyboard), blueprint: 'stale',
-    })
-    const path = join(root, '演示项目', '分镜', '单元', 'U01.md')
-    const now = new Date()
-    await utimes(path, now, now)
-    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
-    expect(decision.allow === false && decision.reason).toContain('分镜/单元/U01.md 比画布新')
-  })
-
-  it('admits a blueprint laid after the unit was last touched', async () => {
-    const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT), blueprint: 'fresh' })
+  it('does not read the blueprint at all, so a stale one changes nothing', async () => {
+    const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT) })
+    const dir = join(root, '演示项目')
+    const blueprint = join(dir, 'canvas-blueprint.json')
+    await writeFile(blueprint, '{"nodes":[],"connections":[]}')
+    // Older than the prompt it would have been checked against, i.e. the exact
+    // shape of the old "比画布新" refusal.
+    const old = new Date(Date.now() - 600_000)
+    await utimes(blueprint, old, old)
     const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
     expect(decision.allow).toBe(true)
   })
@@ -337,15 +307,12 @@ describe('the canvas half of the gate', () => {
 })
 
 /**
- * A project holding a manifest, whatever asset images a test asks for, and a
- * blueprint when it asks for one. `beforeImages` is the ordinary case — the
- * layout goes up before the batch is paid for — and is backdated to make that
- * explicit rather than incidental.
+ * A project holding a manifest and whatever asset images a test asks for. No
+ * blueprint: images are gated on the manifest and the L0 ledger only.
  */
 async function assetFixture(options: {
   manifest?: string
   images?: readonly string[]
-  blueprint?: 'beforeImages' | 'now'
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'gate-asset-'))
   const dir = join(root, '演示项目')
@@ -358,46 +325,33 @@ async function assetFixture(options: {
     await writeFile(path, 'not really a png')
     await utimes(path, landed, landed)
   }
-  if (options.blueprint !== undefined) {
-    const at = options.blueprint === 'now' ? new Date() : new Date(Date.now() - 600_000)
-    const blueprint = join(dir, 'canvas-blueprint.json')
-    await writeFile(blueprint, '{"nodes":[],"connections":[]}')
-    await utimes(blueprint, at, at)
-  }
   return root
 }
 
-describe('the canvas half of the gate, for images', () => {
+describe('images are gated on the manifest, not on the canvas', () => {
   const IMAGE = '01_角色/CH001_主角/02_定稿图/CH001_主角.png'
 
-  it('refuses the batch when the canvas was never laid', async () => {
+  it('admits the batch when no canvas was ever laid', async () => {
     const root = await assetFixture({ manifest: MANIFEST })
     const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: 'CH001_主角' })
-    expect(decision.allow).toBe(false)
-    const reason = decision.allow === false ? decision.reason : ''
-    expect(reason).toContain('还没铺过画布')
-    expect(reason).toContain('参考 11-canvas-preview.md')
-    expect(reason.split('\n')).toHaveLength(1)
-  })
-
-  it('lays once for the whole batch: a blueprint older than every image is still current', async () => {
-    // Every prompt in the batch is written before the first image is paid for,
-    // so the layout goes up first and the images land underneath it. Checking the
-    // blueprint against the images' mtimes would invert that and force one layout
-    // per image — which is the cost this rule exists to avoid, not to cause.
-    const root = await assetFixture({ manifest: MANIFEST, images: [IMAGE], blueprint: 'beforeImages' })
-    const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: 'SC001_厨房' })
     expect(decision.allow).toBe(true)
   })
 
-  it('does not care how many images have landed since the layout', async () => {
+  it('admits the batch however many images have landed', async () => {
     const root = await assetFixture({
       manifest: MANIFEST,
       images: [IMAGE, '02_场景/SC001_厨房/02_定稿图/SC001_厨房.png', '03_道具/PR001_陶锅/02_定稿图/PR001_陶锅.png'],
-      blueprint: 'beforeImages',
     })
     const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: 'PR001_陶锅' })
     expect(decision.allow).toBe(true)
+  })
+
+  it('still refuses an image the manifest never planned', async () => {
+    const root = await assetFixture({ manifest: MANIFEST })
+    const decision = await checkGate({ kind: 'image', assetsRoot: root, project: '演示项目', label: 'KF03_格3_奶奶出门' })
+    expect(decision.allow).toBe(false)
+    expect(decision.allow === false && decision.reason).toContain('KF03')
+    expect(decision.allow === false && decision.reason).toContain('05-asset-library.md')
   })
 
   it('leaves a project with no manifest alone, so the style probes at P1 still run', async () => {

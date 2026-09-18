@@ -120,16 +120,15 @@ const MANIFEST = [
 ].join('\n')
 
 /**
- * A session workspace whose `.assets/<project>/` holds a real manifest and a
- * laid-out canvas. Both, because image generation is only paid for once the
- * batch has been laid out — a manifest without a canvas is refused.
+ * A session workspace whose `.assets/<project>/` holds a real manifest. No
+ * canvas: it is a display layer the skill lays only when the user asks for one,
+ * and image generation is gated on the manifest alone.
  */
 async function workspaceWithManifest(): Promise<string> {
   const workspace = await mkdtemp(join(tmpdir(), 'gate-hook-'))
   const dir = join(workspace, '.assets', '演示项目')
   await mkdir(dir, { recursive: true })
   await writeFile(join(dir, '演示项目_资产库.md'), MANIFEST)
-  await writeFile(join(dir, 'canvas-blueprint.json'), '{"nodes":[],"connections":[]}')
   return workspace
 }
 

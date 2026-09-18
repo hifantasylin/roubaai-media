@@ -28,7 +28,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { readFile, readdir, stat } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 
 /** The generation kinds the gate guards. */
@@ -118,13 +118,6 @@ async function findManifest(projectDir: string): Promise<string | undefined> {
 
 /** Where the L0 gate writes its ledger, relative to the project directory. */
 const STAMP_FILE = '.gates/l0.json'
-
-/**
- * The canvas blueprint, relative to the project directory. The skill fixes this
- * path (`11-canvas-preview.md`: 不可改名换位) precisely so that a reader other
- * than the canvas frontend can find it.
- */
-const BLUEPRINT_FILE = 'canvas-blueprint.json'
 
 /**
  * Where a unit's two artifacts live, relative to the project directory. This
@@ -232,66 +225,6 @@ async function checkUnitStamps(projectDir: string, files: readonly string[]): Pr
   return undefined
 }
 
-/** A file's modification time, or undefined when it is not there. */
-async function mtimeOf(path: string): Promise<number | undefined> {
-  try {
-    return (await stat(path)).mtimeMs
-  } catch {
-    return undefined
-  }
-}
-
-/** The newest of `rels`, which is the one a blueprint has to have caught up with. */
-async function newestOf(projectDir: string, rels: readonly string[]): Promise<{ rel: string; mtime: number } | undefined> {
-  let newest: { rel: string; mtime: number } | undefined
-  for (const rel of rels) {
-    const mtime = await mtimeOf(join(projectDir, rel))
-    if (mtime !== undefined && (newest === undefined || mtime > newest.mtime)) newest = { rel, mtime }
-  }
-  return newest
-}
-
-/**
- * The canvas half of the gate: a paid call may only start once the blueprint on
- * disk is there — and, when the caller names something it has to have caught up
- * with, at least as new as that.
- *
- * The rule it enforces is the skill's own (`11-canvas-preview.md` §阶段接续,
- * §完成标准): 动手之前先把这一批铺出来给用户看。For images that is a single
- * layout before the batch starts — every prompt is already written by then, so
- * the cards go up with their prompts and empty urls, and the whole batch then
- * runs against one blueprint. For shots it is a re-lay after the prompt passed
- * review, because L0 sends the prompt back to be edited.
- *
- * What this can prove is narrow, and worth stating: the blueprint is there, and
- * where a reference is given, that it is newer. Not that a human read it. It
- * catches "never laid the canvas at all" and "laid it, then changed the work",
- * which is what the rule was written against. It cannot catch "laid it and
- * nobody looked", and no check on a file can — that would need the model to
- * declare its own compliance.
- * @param kind - `generate_image` or `generate_video`, for the refusal's first word.
- * @param projectDir - the project directory under the asset root.
- * @param newest - the artifact the canvas has to have caught up with, if any.
- * @returns a refusal, or undefined when the canvas is in order.
- */
-async function checkBlueprint(
-  kind: string,
-  projectDir: string,
-  newest?: { readonly rel: string; readonly mtime: number },
-): Promise<GateDecision | undefined> {
-  const blueprint = await mtimeOf(join(projectDir, BLUEPRINT_FILE))
-  if (blueprint === undefined) {
-    return { allow: false, reason: `${kind} 被拒：还没铺过画布，铺了再生成。参考 11-canvas-preview.md。` }
-  }
-  if (newest === undefined) return undefined
-  // A tie passes: the same write can land on the same millisecond, and refusing
-  // that would fail a run that did exactly what the document asks.
-  if (newest.mtime > blueprint) {
-    return { allow: false, reason: `${kind} 被拒：${newest.rel} 比画布新，重铺了再生成。参考 11-canvas-preview.md。` }
-  }
-  return undefined
-}
-
 /**
  * Decide whether one paid generation may start.
  *
@@ -308,6 +241,10 @@ async function checkBlueprint(
  *
  * The refusal that matters is the one it can actually make: the project HAS a
  * plan, and this generation is not in it.
+ *
+ * The canvas is deliberately NOT part of this. It is a display layer the skill
+ * lays only when the user asks for it, so "no canvas yet" is a legitimate state
+ * of a project that is generating, not a reason to refuse one.
  * @param request - the facts the gate needs about one paid call.
  * @returns whether the call may proceed, and why not when it may not.
  */
@@ -339,33 +276,16 @@ export async function checkGate(request: GateRequest): Promise<GateDecision> {
     if (named.length === 0) notes.push('label 未标明资产编号')
   }
 
-  // ② 画布（图）：整批的提示词在出图前就写好了，所以这时候一次把整批铺出来
-  // （prompt 填上、url 空着）再动手。只查"铺没铺过"，不查新旧 —— 蓝图本来就该
-  // 比这一批图早，拿图片的 mtime 去要求它只会逼成"出一张铺一张"。
-  // 只在这个项目已经有清单时查：立项前那几张风格试探是正当的第一站活。
-  if (request.kind === 'image' && manifestPath !== undefined) {
-    const refusal = await checkBlueprint(kind, projectDir)
-    if (refusal !== undefined) return refusal
-  }
-
-  // ③ 记录与画布（镜头）：这一版的分镜提示词过没过 L0、过审后铺没铺画布。
+  // ② 记录（镜头）：这一版的分镜提示词过没过 L0。画布不在这里查 —— 见上面
+  // checkGate 的说明（画布是用户要了才铺的展示层，没铺不是拒绝的理由）。
   if (request.kind === 'video') {
     const unit = unitOf(request)
     if (unit === undefined) {
-      notes.push('没标明单元号（label 里没有 U01 这类编号），无法核对 L0 与画布')
+      notes.push('没标明单元号（label 里没有 U01 这类编号），无法核对 L0')
     } else {
       const files = await unitFiles(projectDir, unit)
       const stamps = await checkUnitStamps(projectDir, files)
       if (stamps !== undefined) return stamps
-      // Ordered after the stamps because the document orders them that way
-      // (过审 → 重铺 → 生成): a prompt that still needs work is the more useful
-      // thing to report first. A unit with no artifact on disk has nothing to
-      // preview and is left alone, the asymmetry the L0 half also uses.
-      const newest = await newestOf(projectDir, files)
-      if (newest !== undefined) {
-        const canvas = await checkBlueprint(kind, projectDir, newest)
-        if (canvas !== undefined) return canvas
-      }
     }
   }
 
