@@ -167,6 +167,7 @@ async function unitFixture(options: {
   prompt?: string | null
   unitFile?: string
   ledger?: unknown
+  reviews?: unknown
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'gate-unit-'))
   const dir = join(root, '演示项目')
@@ -187,6 +188,10 @@ async function unitFixture(options: {
     await mkdir(join(dir, '.gates'), { recursive: true })
     await writeFile(join(dir, '.gates', 'l0.json'), JSON.stringify(options.ledger))
   }
+  if (options.reviews !== undefined) {
+    await mkdir(join(dir, '.gates'), { recursive: true })
+    await writeFile(join(dir, '.gates', 'l2.json'), JSON.stringify(options.reviews))
+  }
   // Backdated so "newer" is never a same-millisecond tie.
   for (const artifact of artifacts) await utimes(artifact, UNIT_MTIME, UNIT_MTIME)
   return root
@@ -200,6 +205,41 @@ function ledgerFor(rel: string, text: string, errors: readonly string[] = []): u
       [rel]: { sha256: createHash('sha256').update(text, 'utf8').digest('hex'), errors, warns: [], chars: 1, tool: 'check-prompt.mjs', ts: 1 },
     },
   }
+}
+
+/** The hash a review records for one artifact. */
+function hashOf(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
+/**
+ * An `.gates/l2.json` recording one unit's verdict over the given artifacts.
+ *
+ * The shape is the one the skill-side writer leaves (`00-gates.md` §7): verdict,
+ * reviewer, one hash per reviewed artifact, and the open-findings count. The
+ * L0 ledger is deliberately written separately in each test, because whether L0
+ * passed is not what these cases are about.
+ */
+function reviewsFor(unit: string, reviewed: Record<string, string>, extra: Record<string, unknown> = {}): unknown {
+  return {
+    version: 1,
+    units: {
+      [unit]: {
+        verdict: 'pass',
+        reviewer: 'L2 审核者 A',
+        sha256: Object.fromEntries(Object.entries(reviewed).map(([rel, text]) => [rel, hashOf(text)])),
+        openFindings: 0,
+        ...extra,
+      },
+    },
+  }
+}
+
+/** The L0 stamp plus the L2 verdict for the one-artifact fixture. */
+const CLEAN_UNIT = {
+  manifest: MANIFEST,
+  ledger: ledgerFor('prompts/U01.md', PROMPT),
+  reviews: reviewsFor('U01', { 'prompts/U01.md': PROMPT }),
 }
 
 describe('the L0 stamp half of the gate', () => {
@@ -257,7 +297,7 @@ describe('the L0 stamp half of the gate', () => {
   })
 
   it('admits a clean, current stamp', async () => {
-    const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT) })
+    const root = await unitFixture(CLEAN_UNIT)
     const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
     expect(decision.allow).toBe(true)
   })
@@ -275,19 +315,184 @@ describe('the L0 stamp half of the gate', () => {
   })
 })
 
+describe('the L2 review half of the gate', () => {
+  it('refuses a unit that is clean at L0 but was never reviewed', async () => {
+    // The shape of the accident this half exists for (2026-09-20): the prompt
+    // passed the mechanical gate, nothing was recorded about the review, and a
+    // batch was submitted while the reviewers were still out.
+    const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT) })
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(false)
+    const reason = decision.allow === false ? decision.reason : ''
+    expect(reason).toContain('还没过 L2')
+    expect(reason).toContain('.gates/l2.json')
+    expect(reason).toContain('参考 00-gates.md')
+    expect(reason.split('\n')).toHaveLength(1)
+  })
+
+  it('admits the version a reviewer closed, and adds no marking of its own', async () => {
+    const root = await unitFixture(CLEAN_UNIT)
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(true)
+    // Whatever note comes back is the manifest half talking (this call names no
+    // asset); a closed review is not itself worth a mark.
+    expect(decision.allow === true ? decision.note ?? '' : '').not.toContain('用户豁免')
+  })
+
+  it('refuses a verdict of needs_revision', async () => {
+    const root = await unitFixture({
+      ledger: ledgerFor('prompts/U01.md', PROMPT),
+      reviews: reviewsFor('U01', { 'prompts/U01.md': PROMPT }, { verdict: 'needs_revision' }),
+    })
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(false)
+    const reason = decision.allow === false ? decision.reason : ''
+    expect(reason).toContain('needs_revision')
+    expect(reason).toContain('参考 00-gates.md')
+    expect(reason.split('\n')).toHaveLength(1)
+  })
+
+  it('refuses while findings the review raised are still open', async () => {
+    const root = await unitFixture({
+      ledger: ledgerFor('prompts/U01.md', PROMPT),
+      reviews: reviewsFor('U01', { 'prompts/U01.md': PROMPT }, { openFindings: 3 }),
+    })
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(false)
+    const reason = decision.allow === false ? decision.reason : ''
+    expect(reason).toContain('3 条 L2 findings 没关闭')
+    expect(reason).toContain('参考 00-gates.md')
+  })
+
+  it('refuses a version edited after it was reviewed, even with a fresh L0 stamp', async () => {
+    // Re-running L0 is the cheap way past the L0 half, so the drift check has to
+    // be the review's own: the stamp here matches the text on disk, and only the
+    // hash the reviewer recorded catches that the reviewed text is gone.
+    const edited = `${PROMPT}\n改了一句。\n`
+    const root = await unitFixture({
+      prompt: edited,
+      ledger: ledgerFor('prompts/U01.md', edited),
+      reviews: reviewsFor('U01', { 'prompts/U01.md': PROMPT }),
+    })
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(false)
+    const reason = decision.allow === false ? decision.reason : ''
+    expect(reason).toContain('指纹不符')
+    expect(reason).toContain('这一版没审')
+    expect(reason).toContain('参考 00-gates.md')
+  })
+
+  it('lets the user spend anyway, on their own words, and marks it', async () => {
+    const root = await unitFixture({
+      ledger: ledgerFor('prompts/U01.md', PROMPT),
+      reviews: reviewsFor(
+        'U01',
+        { 'prompts/U01.md': PROMPT },
+        { verdict: 'needs_revision', openFindings: 2, waiver: { text: '这次先出，别改', date: '2026-09-20' } },
+      ),
+    })
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(true)
+    expect(decision.allow === true && decision.note).toContain('用户豁免：这次先出，别改')
+  })
+
+  it('reads a waiver written as a bare sentence too', async () => {
+    const root = await unitFixture({
+      ledger: ledgerFor('prompts/U01.md', PROMPT),
+      reviews: reviewsFor('U01', { 'prompts/U01.md': PROMPT }, { verdict: 'needs_revision', waiver: '放行' }),
+    })
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(true)
+  })
+
+  it('does not let a waiver cover a version nobody reviewed', async () => {
+    // A waiver is said about one text. The hash check is what keeps it from
+    // being read as "anything from this unit may be paid for".
+    const root = await unitFixture({
+      prompt: `${PROMPT}\n又改了。\n`,
+      ledger: ledgerFor('prompts/U01.md', `${PROMPT}\n又改了。\n`),
+      reviews: reviewsFor('U01', { 'prompts/U01.md': PROMPT }, { verdict: 'needs_revision', waiver: '放行' }),
+    })
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(false)
+    expect(decision.allow === false && decision.reason).toContain('指纹不符')
+  })
+
+  it('refuses a record that names nobody as the reviewer', async () => {
+    const root = await unitFixture({
+      ledger: ledgerFor('prompts/U01.md', PROMPT),
+      reviews: reviewsFor('U01', { 'prompts/U01.md': PROMPT }, { reviewer: '  ' }),
+    })
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(false)
+    expect(decision.allow === false && decision.reason).toContain('没写审者')
+  })
+
+  it('refuses a record that only covers one of the unit two artifacts', async () => {
+    const root = await unitFixture({
+      unitFile: '# U01\n',
+      ledger: ledgerFor('prompts/U01.md', PROMPT),
+      reviews: reviewsFor('U01', { 'prompts/U01.md': PROMPT }),
+    })
+    await writeFile(join(root, '演示项目', '.gates', 'l0.json'), JSON.stringify({
+      version: 1,
+      stamps: {
+        'prompts/U01.md': { sha256: hashOf(PROMPT), errors: [], warns: [], chars: 1, tool: 'check-prompt.mjs', ts: 1 },
+        '分镜/单元/U01.md': { sha256: hashOf('# U01\n'), errors: [], warns: [], chars: 1, tool: 'check-unit.mjs', ts: 1 },
+      },
+    }))
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(false)
+    const reason = decision.allow === false ? decision.reason : ''
+    expect(reason).toContain('分镜/单元/U01.md')
+    expect(reason).toContain('没有')
+  })
+
+  it('refuses a record whose reviewed artifacts are no longer the ones on disk', async () => {
+    const root = await unitFixture({
+      ledger: ledgerFor('prompts/U01.md', PROMPT),
+      reviews: reviewsFor('U01', { 'prompts/U01.md': PROMPT, '分镜/单元/U01.md': '# U01\n' }),
+    })
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(false)
+    const reason = decision.allow === false ? decision.reason : ''
+    expect(reason).toContain('分镜/单元/U01.md')
+    expect(reason).toContain('审结作废')
+  })
+
+  it('refuses a record that does not say whether the findings were closed', async () => {
+    const root = await unitFixture({
+      ledger: ledgerFor('prompts/U01.md', PROMPT),
+      reviews: reviewsFor('U01', { 'prompts/U01.md': PROMPT }, { openFindings: undefined }),
+    })
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(false)
+    expect(decision.allow === false && decision.reason).toContain('openFindings')
+  })
+
+  it('matches the reviewed paths case-insensitively, the way the filesystem does', async () => {
+    const root = await unitFixture({
+      ledger: ledgerFor('prompts/U01.md', PROMPT),
+      reviews: reviewsFor('U01', { 'Prompts/U01.md': PROMPT }),
+    })
+    const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
+    expect(decision.allow).toBe(true)
+  })
+})
+
 describe('the canvas is not part of the gate', () => {
   it('admits a unit that passed L0 and was never laid out on the canvas', async () => {
     // The rule that used to live here (2026-09-17 → 2026-09-18) refused this.
     // It was removed because the canvas is a display layer the skill lays only
     // when the user asks for one: "no canvas yet" is a legitimate state of a
     // project that is generating, so it cannot be a reason to refuse a call.
-    const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT) })
+    const root = await unitFixture(CLEAN_UNIT)
     const decision = await checkGate({ kind: 'video', assetsRoot: root, project: '演示项目', unit: 'U01' })
     expect(decision.allow).toBe(true)
   })
 
   it('does not read the blueprint at all, so a stale one changes nothing', async () => {
-    const root = await unitFixture({ ledger: ledgerFor('prompts/U01.md', PROMPT) })
+    const root = await unitFixture(CLEAN_UNIT)
     const dir = join(root, '演示项目')
     const blueprint = join(dir, 'canvas-blueprint.json')
     await writeFile(blueprint, '{"nodes":[],"connections":[]}')

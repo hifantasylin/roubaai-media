@@ -24,6 +24,13 @@
  * about the project's own files — and leaves everything inside that boundary to
  * the model and the user.
  *
+ * Of those three, "reviewed" is a process fact rather than a property of the
+ * artifact: it exists on disk only because a reviewer wrote it down. So the gate
+ * reads two ledgers — `.gates/l0.json` for "this version passed the mechanical
+ * gate" and `.gates/l2.json` for "this version was reviewed and closed" — and
+ * refuses when either is missing for the version on disk. See `checkUnitStamps`
+ * and `checkUnitReviews`.
+ *
  * @module @roubaai/media/gate
  */
 
@@ -119,6 +126,9 @@ async function findManifest(projectDir: string): Promise<string | undefined> {
 /** Where the L0 gate writes its ledger, relative to the project directory. */
 const STAMP_FILE = '.gates/l0.json'
 
+/** Where the L2 review verdicts are recorded, relative to the project directory. */
+const REVIEW_FILE = '.gates/l2.json'
+
 /**
  * Where a unit's two artifacts live, relative to the project directory. This
  * mirrors the layout the skill's text-asset single source declares, and is a
@@ -132,6 +142,26 @@ interface Stamp {
   readonly sha256: string
   readonly errors: readonly string[]
   readonly tool: string
+}
+
+/**
+ * One recorded L2 review, bound to the hashes of the files it reviewed.
+ *
+ * Every field is read structurally rather than validated up front: a hand-written
+ * ledger is the normal case here, and a malformed field has to end in a refusal
+ * with a nameable reason, not in a thrown error that reads like a host fault.
+ */
+interface Review {
+  /** `pass` or `needs_revision`; anything else is unreadable and refuses. */
+  readonly verdict?: unknown
+  /** Who reviewed it. A review nobody is named for is not a review. */
+  readonly reviewer?: unknown
+  /** Hash per project-relative POSIX path, over the artifacts as reviewed. */
+  readonly sha256?: unknown
+  /** Findings the review raised that were never closed. */
+  readonly openFindings?: unknown
+  /** The user's own words, when they chose to spend anyway. */
+  readonly waiver?: unknown
 }
 
 /**
@@ -225,6 +255,148 @@ async function checkUnitStamps(projectDir: string, files: readonly string[]): Pr
   return undefined
 }
 
+/** The L2 ledger's reviews, keyed by the unit id they were recorded under. */
+async function readReviews(projectDir: string): Promise<Record<string, Review>> {
+  try {
+    const parsed = JSON.parse(await readFile(join(projectDir, REVIEW_FILE), 'utf8')) as { units?: Record<string, Review> }
+    return parsed.units ?? {}
+  } catch {
+    return {} // 还没写过审结，或台账被改坏：当作一条都没有
+  }
+}
+
+/** One artifact a review recorded: its path as written, and the hash it saw. */
+interface ReviewedHash {
+  /** The path exactly as the ledger spells it, so a refusal names it back. */
+  readonly rel: string
+  /** The file's content hash as reviewed. */
+  readonly hash: string
+}
+
+/** The hash map a review recorded, keyed case-insensitively (Windows paths are). */
+function reviewedHashes(record: Review): Map<string, ReviewedHash> {
+  const out = new Map<string, ReviewedHash>()
+  if (typeof record.sha256 !== 'object' || record.sha256 === null) return out
+  for (const [rel, hash] of Object.entries(record.sha256 as Record<string, unknown>)) {
+    if (typeof hash === 'string' && hash.trim() !== '') out.set(rel.toLowerCase(), { rel, hash: hash.trim() })
+  }
+  return out
+}
+
+/** Findings the review left open, or undefined when that count is unreadable. */
+function openFindingsOf(record: Review): number | undefined {
+  const value = record.openFindings
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined
+}
+
+/**
+ * The user's own words when they chose to spend past an open review, in either
+ * of the two shapes the ledger accepts: a bare sentence, or `{ text, date }`.
+ */
+function waiverOf(record: Review): string | undefined {
+  const raw = record.waiver
+  if (typeof raw === 'string' && raw.trim() !== '') return raw.trim()
+  const text = (raw as { text?: unknown } | null | undefined)?.text
+  return typeof text === 'string' && text.trim() !== '' ? text.trim() : undefined
+}
+
+/**
+ * The L2 half of the gate: a shot may only be paid for once an independent
+ * reviewer has closed **this** version of the unit.
+ *
+ * L0 and L2 answer different questions. L0 asks whether the artifact is clean;
+ * L2 asks whether anyone looked at it. Only the second is a process fact, and a
+ * process fact leaves no trace on disk unless someone writes it down — which is
+ * exactly how a batch of eight 64s shots was submitted on 2026-09-20 with every
+ * unit clean at L0 and not one verdict closed (≈¥2.1, and all eight failed
+ * review minutes later). The L0 ledger could not see it, because it was never
+ * about the artifact.
+ *
+ * So this reads `.gates/l2.json` and refuses unless every artifact of the unit
+ * is covered by a `pass` with no open findings, by a named reviewer, over
+ * exactly the text on disk now. A changed file is a different version: the
+ * review is void, and re-running L0 does not bring it back.
+ *
+ * A `waiver` — the user's own words — is the one way past an open verdict, and
+ * it does not reach the hash check: a waiver given about one text says nothing
+ * about another. Like the L0 half, this stays out of the way until the unit has
+ * artifacts to review, so a project that does not keep units this way is not
+ * refused into a corner.
+ * @param projectDir - the project directory under the asset root.
+ * @param unit - the upper-cased unit id the call names.
+ * @param files - the unit's artifacts that exist on disk, project-relative.
+ * @returns a refusal, or undefined when there is nothing to refuse.
+ */
+async function checkUnitReviews(
+  projectDir: string,
+  unit: string,
+  files: readonly string[],
+): Promise<GateDecision | undefined> {
+  if (files.length === 0) return undefined
+  const reviews = await readReviews(projectDir)
+  const record = reviews[unit]
+  if (record === undefined) {
+    return {
+      allow: false,
+      reason: `generate_video 被拒：${unit} 还没过 L2（${REVIEW_FILE} 里没有这一单元）。参考 00-gates.md。`,
+    }
+  }
+  const reviewer = typeof record.reviewer === 'string' ? record.reviewer.trim() : ''
+  if (reviewer === '') {
+    return {
+      allow: false,
+      reason: `generate_video 被拒：${unit} 的 L2 记录没写审者（reviewer）。参考 00-gates.md。`,
+    }
+  }
+
+  const reviewed = reviewedHashes(record)
+  for (const rel of files) {
+    const recorded = reviewed.get(rel.toLowerCase())
+    if (recorded === undefined) {
+      return {
+        allow: false,
+        reason: `generate_video 被拒：${unit} 的 L2 记录里没有 ${rel} 的被审版指纹。参考 00-gates.md。`,
+      }
+    }
+    const current = sha256(await readFile(join(projectDir, rel), 'utf8'))
+    if (current !== recorded.hash) {
+      return {
+        allow: false,
+        reason: `generate_video 被拒：${unit} 过了 L2 之后又改过（${rel} 指纹不符），这一版没审。参考 00-gates.md。`,
+      }
+    }
+  }
+  for (const [key, recorded] of reviewed) {
+    if (!files.some(file => file.toLowerCase() === key)) {
+      return {
+        allow: false,
+        reason: `generate_video 被拒：${unit} 的被审版里有 ${recorded.rel}，现在盘上没有这一份，审结作废。参考 00-gates.md。`,
+      }
+    }
+  }
+
+  const open = openFindingsOf(record)
+  const waiver = waiverOf(record)
+  const closed = record.verdict === 'pass' && open === 0
+  if (!closed) {
+    if (waiver !== undefined && (record.verdict === 'needs_revision' || (open ?? 0) > 0)) {
+      return {
+        allow: true,
+        note: `generate_video: ${unit} 带着没关闭的 L2 结论放行 —— 用户豁免：${waiver}`,
+      }
+    }
+    const state = record.verdict === 'needs_revision'
+      ? `L2 verdict 是 needs_revision`
+      : open === undefined
+        ? `L2 记录读不出 findings 关闭数（openFindings）`
+        : open > 0
+          ? `还有 ${open} 条 L2 findings 没关闭`
+          : `L2 verdict 读不出来（要 pass 或 needs_revision）`
+    return { allow: false, reason: `generate_video 被拒：${unit} 的 ${state}。参考 00-gates.md。` }
+  }
+  return undefined
+}
+
 /**
  * Decide whether one paid generation may start.
  *
@@ -276,7 +448,7 @@ export async function checkGate(request: GateRequest): Promise<GateDecision> {
     if (named.length === 0) notes.push('label 未标明资产编号')
   }
 
-  // ② 记录（镜头）：这一版的分镜提示词过没过 L0。画布不在这里查 —— 见上面
+  // ② 记录（镜头）：这一版的分镜提示词过没过 L0、有没有人审过。画布不在这里查 —— 见上面
   // checkGate 的说明（画布是用户要了才铺的展示层，没铺不是拒绝的理由）。
   if (request.kind === 'video') {
     const unit = unitOf(request)
@@ -286,6 +458,9 @@ export async function checkGate(request: GateRequest): Promise<GateDecision> {
       const files = await unitFiles(projectDir, unit)
       const stamps = await checkUnitStamps(projectDir, files)
       if (stamps !== undefined) return stamps
+      // L2 只在 L0 之后问：机器说这一版干净了，才轮到问"有人看过吗"。
+      const reviews = await checkUnitReviews(projectDir, unit, files)
+      if (reviews !== undefined) return reviews
     }
   }
 
