@@ -145,21 +145,29 @@ interface Stamp {
 }
 
 /**
- * One recorded L2 review, bound to the hashes of the files it reviewed.
+ * One recorded L2 review, in the shape `.handoff/闸门改造/L2凭证schema契约.md`
+ * fixes (v1): who reviewed the unit, what they concluded, and the hash of the
+ * text they read. That document is the single source of truth for this shape —
+ * the skill writes it, this reads it, and the field names are shared verbatim.
  *
- * Every field is read structurally rather than validated up front: a hand-written
- * ledger is the normal case here, and a malformed field has to end in a refusal
- * with a nameable reason, not in a thrown error that reads like a host fault.
+ * Every field is read structurally rather than validated up front: a
+ * hand-written ledger is the normal case here, and a malformed field has to end
+ * in a refusal with a nameable reason, not in a thrown error that reads like a
+ * host fault.
  */
 interface Review {
-  /** `pass` or `needs_revision`; anything else is unreadable and refuses. */
+  /** `pass` or `needs_revision` — the reviewer's own verdict, not a summary. */
   readonly verdict?: unknown
   /** Who reviewed it. A review nobody is named for is not a review. */
-  readonly reviewer?: unknown
-  /** Hash per project-relative POSIX path, over the artifacts as reviewed. */
-  readonly sha256?: unknown
-  /** Findings the review raised that were never closed. */
-  readonly openFindings?: unknown
+  readonly reviewers?: unknown
+  /**
+   * The hash of the reviewed text. v1 records one string: the content hash of
+   * `prompts/U0X.md`. A per-artifact map is also accepted — same wording, one
+   * entry per reviewed artifact — and then every one of them is pinned.
+   */
+  readonly reviewedSha256?: unknown
+  /** Findings the review raised: `{ open, closed, high, medium, low }`. */
+  readonly findings?: unknown
   /** The user's own words, when they chose to spend anyway. */
   readonly waiver?: unknown
 }
@@ -273,31 +281,65 @@ interface ReviewedHash {
   readonly hash: string
 }
 
-/** The hash map a review recorded, keyed case-insensitively (Windows paths are). */
-function reviewedHashes(record: Review): Map<string, ReviewedHash> {
-  const out = new Map<string, ReviewedHash>()
-  if (typeof record.sha256 !== 'object' || record.sha256 === null) return out
-  for (const [rel, hash] of Object.entries(record.sha256 as Record<string, unknown>)) {
-    if (typeof hash === 'string' && hash.trim() !== '') out.set(rel.toLowerCase(), { rel, hash: hash.trim() })
+/**
+ * The hashes a review recorded, in whichever of the two documented shapes it used.
+ *
+ * v1 records one string — the hash of `prompts/U0X.md`. A map is also accepted
+ * (one entry per reviewed artifact), which pins the storyboard unit file too;
+ * both shapes are written down in the contract, so neither surprises the writer.
+ */
+type Reviewed =
+  | { readonly kind: 'prompt'; readonly hash: string }
+  | { readonly kind: 'map'; readonly entries: Map<string, ReviewedHash> }
+
+/**
+ * Read `reviewedSha256` in either documented shape.
+ * @param record - the unit's review entry.
+ * @returns the reviewed hashes, or undefined when the field is neither shape.
+ */
+function reviewedHashes(record: Review): Reviewed | undefined {
+  const raw = record.reviewedSha256
+  if (typeof raw === 'string' && raw.trim() !== '') return { kind: 'prompt', hash: raw.trim() }
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const entries = new Map<string, ReviewedHash>()
+  for (const [rel, hash] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof hash === 'string' && hash.trim() !== '') entries.set(rel.toLowerCase(), { rel, hash: hash.trim() })
   }
-  return out
+  return entries.size === 0 ? undefined : { kind: 'map', entries }
 }
 
 /** Findings the review left open, or undefined when that count is unreadable. */
 function openFindingsOf(record: Review): number | undefined {
-  const value = record.openFindings
+  const findings = record.findings
+  if (typeof findings !== 'object' || findings === null) return undefined
+  const value = (findings as { open?: unknown }).open
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined
 }
 
+/** The reviewer ids a review names; an empty list is not a review. */
+function reviewersOf(record: Review): readonly string[] {
+  if (!Array.isArray(record.reviewers)) return []
+  return record.reviewers.filter((id): id is string => typeof id === 'string' && id.trim() !== '')
+}
+
 /**
- * The user's own words when they chose to spend past an open review, in either
- * of the two shapes the ledger accepts: a bare sentence, or `{ text, date }`.
+ * The user's own words and the moment they said them, when they chose to spend
+ * past an open verdict. A bare sentence is accepted as the words, with no moment.
  */
-function waiverOf(record: Review): string | undefined {
+function waiverOf(record: Review): { readonly quote: string; readonly at: string } | undefined {
   const raw = record.waiver
-  if (typeof raw === 'string' && raw.trim() !== '') return raw.trim()
-  const text = (raw as { text?: unknown } | null | undefined)?.text
-  return typeof text === 'string' && text.trim() !== '' ? text.trim() : undefined
+  if (typeof raw === 'string' && raw.trim() !== '') return { quote: raw.trim(), at: '' }
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const quote = (raw as { quote?: unknown }).quote
+  if (typeof quote !== 'string' || quote.trim() === '') return undefined
+  const at = (raw as { at?: unknown }).at
+  return { quote: quote.trim(), at: typeof at === 'string' ? at.trim() : '' }
+}
+
+/** The unit's prompt artifact, which v1's single-hash form names. */
+function promptFileOf(files: readonly string[], unit: string): string | undefined {
+  const wanted = `prompts/${unit}.md`.toLowerCase()
+  return files.find(file => file.toLowerCase() === wanted)
 }
 
 /**
@@ -312,10 +354,10 @@ function waiverOf(record: Review): string | undefined {
  * review minutes later). The L0 ledger could not see it, because it was never
  * about the artifact.
  *
- * So this reads `.gates/l2.json` and refuses unless every artifact of the unit
- * is covered by a `pass` with no open findings, by a named reviewer, over
- * exactly the text on disk now. A changed file is a different version: the
- * review is void, and re-running L0 does not bring it back.
+ * So this reads `.gates/l2.json` and refuses unless the unit is covered by a
+ * `pass` with no open findings, by a named reviewer, over exactly the text on
+ * disk now. A changed file is a different version: the review is void, and
+ * re-running L0 does not bring it back.
  *
  * A `waiver` — the user's own words — is the one way past an open verdict, and
  * it does not reach the hash check: a waiver given about one text says nothing
@@ -333,68 +375,49 @@ async function checkUnitReviews(
   files: readonly string[],
 ): Promise<GateDecision | undefined> {
   if (files.length === 0) return undefined
+  const refusal = (detail: string): GateDecision => ({
+    allow: false,
+    reason: `generate_video 被拒：${unit} ${detail}参考 00-gates.md。`,
+  })
+
   const reviews = await readReviews(projectDir)
   const record = reviews[unit]
-  if (record === undefined) {
-    return {
-      allow: false,
-      reason: `generate_video 被拒：${unit} 还没过 L2（${REVIEW_FILE} 里没有这一单元）。参考 00-gates.md。`,
-    }
-  }
-  const reviewer = typeof record.reviewer === 'string' ? record.reviewer.trim() : ''
-  if (reviewer === '') {
-    return {
-      allow: false,
-      reason: `generate_video 被拒：${unit} 的 L2 记录没写审者（reviewer）。参考 00-gates.md。`,
-    }
-  }
+  if (record === undefined) return refusal('还没有 L2 审结记录。')
+
+  if (reviewersOf(record).length === 0) return refusal('的 L2 审结没写审者（reviewers）。')
 
   const reviewed = reviewedHashes(record)
-  for (const rel of files) {
-    const recorded = reviewed.get(rel.toLowerCase())
-    if (recorded === undefined) {
-      return {
-        allow: false,
-        reason: `generate_video 被拒：${unit} 的 L2 记录里没有 ${rel} 的被审版指纹。参考 00-gates.md。`,
-      }
+  if (reviewed === undefined) return refusal('的 L2 审结读不出被审版指纹（reviewedSha256）。')
+  if (reviewed.kind === 'prompt') {
+    // v1's single hash names the prompt artifact; without it on disk there is
+    // nothing this record can be checked against.
+    const prompt = promptFileOf(files, unit)
+    if (prompt === undefined) return refusal('的 L2 审结没写清审的是哪一份产物（本单元没有 prompts/ 下的那一份）。')
+    const current = sha256(await readFile(join(projectDir, prompt), 'utf8'))
+    if (current !== reviewed.hash) return refusal('在 L2 审过之后又改过，没重审。')
+  } else {
+    for (const rel of files) {
+      const recorded = reviewed.entries.get(rel.toLowerCase())
+      if (recorded === undefined) continue // 单哈希形态只钉被点名的那一份
+      const current = sha256(await readFile(join(projectDir, rel), 'utf8'))
+      if (current !== recorded.hash) return refusal('在 L2 审过之后又改过，没重审。')
     }
-    const current = sha256(await readFile(join(projectDir, rel), 'utf8'))
-    if (current !== recorded.hash) {
-      return {
-        allow: false,
-        reason: `generate_video 被拒：${unit} 过了 L2 之后又改过（${rel} 指纹不符），这一版没审。参考 00-gates.md。`,
-      }
-    }
-  }
-  for (const [key, recorded] of reviewed) {
-    if (!files.some(file => file.toLowerCase() === key)) {
-      return {
-        allow: false,
-        reason: `generate_video 被拒：${unit} 的被审版里有 ${recorded.rel}，现在盘上没有这一份，审结作废。参考 00-gates.md。`,
+    for (const [key, recorded] of reviewed.entries) {
+      if (!files.some(file => file.toLowerCase() === key)) {
+        return refusal(`的被审版里有 ${recorded.rel}，现在盘上没有这一份，审结作废。`)
       }
     }
   }
 
   const open = openFindingsOf(record)
+  if (open === undefined) return refusal('的 L2 审结读不出 findings 关闭数（findings.open）。')
   const waiver = waiverOf(record)
-  const closed = record.verdict === 'pass' && open === 0
-  if (!closed) {
-    if (waiver !== undefined && (record.verdict === 'needs_revision' || (open ?? 0) > 0)) {
-      return {
-        allow: true,
-        note: `generate_video: ${unit} 带着没关闭的 L2 结论放行 —— 用户豁免：${waiver}`,
-      }
-    }
-    const state = record.verdict === 'needs_revision'
-      ? `L2 verdict 是 needs_revision`
-      : open === undefined
-        ? `L2 记录读不出 findings 关闭数（openFindings）`
-        : open > 0
-          ? `还有 ${open} 条 L2 findings 没关闭`
-          : `L2 verdict 读不出来（要 pass 或 needs_revision）`
-    return { allow: false, reason: `generate_video 被拒：${unit} 的 ${state}。参考 00-gates.md。` }
+  if (record.verdict === 'pass' && open === 0) return undefined
+  if (waiver !== undefined && (record.verdict === 'needs_revision' || open > 0)) {
+    return { allow: true, note: `generate_video: ${unit} 由用户放行（${waiver.at}）` }
   }
-  return undefined
+  const verdict = typeof record.verdict === 'string' ? record.verdict : '未写'
+  return refusal(`的 L2 verdict=${verdict}，findings 还有 ${open} 条没关。`)
 }
 
 /**
